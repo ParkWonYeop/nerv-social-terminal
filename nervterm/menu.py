@@ -148,7 +148,7 @@ def _llm_settings(con) -> None:
         ok, why = llm.probe(prov)
 
         items = [V.MenuItem("1", "프로바이더", value=prov.label,
-                            note=llm.BILLING_KO.get(prov.billing, ""))]
+                            note=prov.billing_label())]
         if prov.wants_model:
             items.append(V.MenuItem(
                 "2", "모델", value=prov.model or "(기본값)"))
@@ -223,7 +223,7 @@ def _pick_provider(con) -> None:
             note = f"{note}  ({why})"
         items.append(V.MenuItem(
             str(i), klass.label,
-            value=llm.BILLING_KO.get(probe.billing, ""),
+            value=probe.billing_label(),
             tone=tone, note=note,
             disabled=bool(blocked),
             disabled_reason=blocked,

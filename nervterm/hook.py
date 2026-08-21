@@ -73,8 +73,11 @@ def _run(payload: dict) -> None:
 
 
 def main() -> int:
-    # 게임이 스스로 띄운 claude 프로세스가 훅을 되돌려 발동시키지 않게.
-    if os.environ.get("REI_GAME"):
+    # 게임이 스스로 띄운 에이전트가 훅을 되돌려 발동시키지 않게.
+    # 이게 없으면 대사 한 줄 만들 때마다 재화가 쌓이고, 캐릭터가
+    # 자기 대사를 근무 실적으로 착각한다.
+    # REI_GAME 은 옛 이름 — 이미 설치된 훅들이 아직 이걸 본다.
+    if os.environ.get("NERV_GAME") or os.environ.get("REI_GAME"):
         return 0
     try:
         raw = sys.stdin.read()

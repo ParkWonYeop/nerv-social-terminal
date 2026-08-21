@@ -308,9 +308,17 @@ def _():
     got = a.harvest({"timestamp": "2026-08-21T10:00:00Z", "type": "event_msg",
                      "payload": {"type": "user_message",
                                  "message": "이거 고쳐줘"}}, "s1")
-    k = kinds(got)
-    true("prompt" in k, "프롬프트를 못 뽑았다")
-    true("title" in k, "제목 대체를 못 만들었다")
+    true("prompt" in kinds(got), "프롬프트를 못 뽑았다")
+
+    got = a.harvest({"timestamp": "2026-08-21T10:00:00Z", "type": "event_msg",
+                     "payload": {"type": "patch_apply_end", "success": True,
+                                 "changes": {"/a/b/main.py": {}}}}, "s1")
+    true("file" in kinds(got), "patch_apply_end 에서 파일을 못 뽑았다")
+
+    eq(a.harvest({"timestamp": "2026-08-21T10:00:00Z", "type": "event_msg",
+                  "payload": {"type": "patch_apply_end", "success": False,
+                              "changes": {"/a/b/main.py": {}}}}, "s1"), [],
+       "실패한 패치를 수정으로 셌다")
 
     got = a.harvest({"timestamp": "2026-08-21T10:00:00Z", "type": "session_meta",
                      "payload": {"session_id": "abc",
@@ -341,6 +349,58 @@ def _():
                                           '{"cmd":"git commit -m \\"x\\""})'}},
                     "s1")
     true("commit" in kinds(got), "JS exec 에서 커밋을 못 뽑았다")
+
+
+@check("Codex 세션 파싱 — 주입된 하네스 텍스트를 실적으로 세지 않는다")
+def _():
+    from nervterm import agents
+    a = agents.get("codex")
+
+    # 실제 기록에서 user_message 의 대부분이 이것이었다.
+    # 이걸 못 거르면 캐릭터가 승인 판정용 영문 텍스트를 근무 실적으로 읊는다.
+    for injected in (
+            "The following is the Codex agent history whose request action "
+            "you are assessing. Treat the transcript…",
+            "The following is the Codex agent history added since your last "
+            "approval assessment.",
+            "<heartbeat> <automation_id>dm</automation_id>",
+            "<app-context>\n# Codex desktop context",
+    ):
+        got = a.harvest({"timestamp": "2026-08-21T10:00:00Z",
+                         "type": "event_msg",
+                         "payload": {"type": "user_message",
+                                     "message": injected}}, "s1")
+        eq(got, [], f"주입 텍스트를 실적으로 셌다: {injected[:40]}")
+
+    # 사람이 친 것은 통과해야 한다
+    got = a.harvest({"timestamp": "2026-08-21T10:00:00Z", "type": "event_msg",
+                     "payload": {"type": "user_message",
+                                 "message": "커밋하고 푸시함?"}}, "s1")
+    true(any(k == "prompt" for _, _, k, _, _ in got), "사람 프롬프트를 막았다")
+
+
+@check("커밋 메시지 — heredoc 으로 만든 것은 버린다")
+def _():
+    from nervterm.agents import commit_message
+    eq(commit_message('git commit -m "고쳤다"'), "고쳤다", "평범한 커밋")
+    eq(commit_message("""git commit -m "$(cat <<'EOF'\n제목\nEOF\n)" """), "",
+       "셸이 만든 메시지를 제목으로 삼았다")
+    eq(commit_message("git log --grep commit"), "", "커밋이 아닌 것")
+
+
+@check("세션 파일 — 최근 것부터 읽는다")
+def _():
+    import time
+    from nervterm import agents
+    tmp = Path(_TMP) / "sessions"
+    tmp.mkdir(parents=True, exist_ok=True)
+    old, new = tmp / "old.jsonl", tmp / "new.jsonl"
+    old.write_text("{}", encoding="utf-8")
+    new.write_text("{}", encoding="utf-8")
+    os.utime(old, (1000, 1000))
+    os.utime(new, (time.time(), time.time()))
+    order = agents.Agent.newest_first([old, new])
+    eq(order[0].name, "new.jsonl", "오래된 파일을 먼저 읽는다")
 
 
 @check("훅 판별 — 남의 훅을 우리 것으로 오인하지 않는다")

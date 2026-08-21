@@ -135,6 +135,7 @@ class OpenAICompat(OpenAIAPI):
     default_model = ""
     default_base_url = "http://localhost:1234"
     default_key_env = "OPENAI_COMPAT_API_KEY"
+    default_timeout = 240
     note = "LM Studio · vLLM · llama.cpp 등. 로컬 주소면 과금 없음으로 본다."
 
     def is_billable(self) -> bool:
@@ -162,6 +163,7 @@ class Ollama(Provider):
     wants_base_url = True
     default_model = "qwen3:14b"
     default_base_url = "http://localhost:11434"
+    default_timeout = 240        # 로컬 모델은 느리다. 여기 14B 가 57초였다
     note = "내 기계에서 돈다. 과금도 플랜 소모도 없다. 대신 느리고 덜 똑똑하다."
 
     def available(self):

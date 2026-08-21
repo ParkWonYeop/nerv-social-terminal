@@ -45,6 +45,10 @@ class Provider:
     default_model = ""
     default_base_url = ""
     default_key_env = ""
+    # 프로바이더마다 느린 정도가 다르다. 로컬 모델은 한참 걸린다 —
+    # 이 기계의 14B 모델이 한 턴에 57초였다. 45초로 잡아 두면 로컬을
+    # 고른 사람은 매번 조용히 폴백 대사만 보게 된다.
+    default_timeout = 45
     note = ""
 
     def __init__(self, cfg: dict):
@@ -67,10 +71,12 @@ class Provider:
 
     @property
     def timeout(self) -> int:
+        """설정에 값이 있으면 그것, 없거나 0 이면 프로바이더 기본값."""
         try:
-            return int(self.cfg.get("timeout") or 45)
+            got = int(self.cfg.get("timeout") or 0)
         except (TypeError, ValueError):
-            return 45
+            got = 0
+        return got if got > 0 else self.default_timeout
 
     # ── 프로바이더가 구현할 것 ─────────────────────────────────────────
     def available(self):
@@ -89,6 +95,20 @@ class Provider:
         달라지는 것은 이걸 덮어쓴다.
         """
         return self.billing == BILLING_API
+
+    def billing_label(self) -> str:
+        """화면에 뜨는 과금 설명.
+
+        분류(billing)가 아니라 **지금 설정에서 실제로** 과금되는지를
+        말한다. 둘이 갈릴 수 있다 — OpenAI 호환 서버는 분류상 API 지만
+        주소가 localhost 면 돈이 나가지 않는다. 분류를 그대로 보여주면
+        무료인 설정에 '토큰당 청구' 라고 써 붙이게 된다.
+        """
+        if self.is_billable():
+            return BILLING_KO[BILLING_API]
+        if self.billing == BILLING_SUBSCRIPTION:
+            return BILLING_KO[BILLING_SUBSCRIPTION]
+        return BILLING_KO[BILLING_NONE]
 
 
 # ═══════════════════════════════════════════════════════════════════════

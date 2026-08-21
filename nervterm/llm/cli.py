@@ -98,6 +98,7 @@ class CodexCLI(Provider):
     id = "codex-cli"
     label = "Codex (구독 좌석)"
     billing = BILLING_SUBSCRIPTION
+    default_timeout = 120        # exec 는 프로세스를 새로 띄운다
     default_model = ""            # 빈 값이면 codex 설정의 기본 모델
     note = "codex 로그인 계정의 플랜 한도를 쓴다. 토큰당 청구 없음."
 
@@ -160,6 +161,7 @@ class CodexLocalCLI(CodexCLI):
     id = "codex-oss"
     label = "Codex — 로컬 모델 (--oss)"
     billing = "none"
+    default_timeout = 300
     note = "codex 가 ollama 또는 LM Studio 로 돈다. 과금도 플랜 소모도 없다."
 
     @property

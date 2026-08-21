@@ -1,72 +1,71 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Claude Code 설정에 EVA 훅을 병합한다.
+"""에이전트 설정에 EVA 훅을 병합한다.
 
-기존 훅(ccsidekick 등)은 절대 건드리지 않고 옆에 추가만 한다.
-  python3 install-hooks.py                  내 계정에 설치 (~/.claude/settings.json)
-  sudo python3 install-hooks.py --global    서버 전체에 설치
-                                            (/etc/claude-code/managed-settings.json)
-  --uninstall / --dry-run 은 두 모드 모두에서 동작한다.
+기존 훅(ccsidekick, peon-ping 등)은 절대 건드리지 않고 옆에 추가만 한다.
+
+  python3 install-hooks.py                      Claude Code 에 설치
+  python3 install-hooks.py --agent codex        Codex 에 설치
+  python3 install-hooks.py --agent all          둘 다
+  sudo python3 install-hooks.py --global        서버 전체 (Claude 만)
+
+  --uninstall / --dry-run 은 모든 모드에서 동작한다.
+
+두 에이전트의 훅 스키마가 같아서 설치 코드도 하나다. Codex 가
+Claude 훅 형식을 그대로 읽는다 — 이벤트 이름도 PascalCase 로 같다.
+들어가는 파일만 다르다:
+
+    Claude   ~/.claude/settings.json      의 "hooks" 키
+    Codex    ~/.codex/hooks.json          파일 전체
 """
 import argparse
 import datetime
 import json
 import os
-import re
 import shutil
 import sys
 from pathlib import Path
 
-SETTINGS = Path.home() / ".claude" / "settings.json"
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from nervterm import agents                                   # noqa: E402
+
+CMD = str(ROOT / "eva") + " hook"
 MANAGED = Path("/etc/claude-code/managed-settings.json")
-CMD = str(Path(__file__).resolve().parent / "eva") + " hook"
 
 TOOL_MATCHER = ("Bash|Edit|Write|NotebookEdit|Read|Grep|Glob|WebFetch|"
                 "WebSearch|Agent|Task|TaskCreate|TaskUpdate|Skill|TodoWrite")
 
-WANTED = {
-    "PostToolUse":        TOOL_MATCHER,
-    "PostToolUseFailure": TOOL_MATCHER,
-    "Stop":               None,
-    "SessionStart":       None,
-    "SessionEnd":         None,
-}
+
+def wanted_for(agent):
+    """이 에이전트에 넣을 {이벤트: matcher}. matcher 가 None 이면 전체."""
+    out = {}
+    for event in agent.events:
+        out[event] = TOOL_MATCHER if event in agent.tool_events else None
+    return out
 
 
-def is_ours(entry) -> bool:
-    """레이 훅인지 정확히 판별한다.
-
-    'rei'와 'hook'이 부분 문자열로 함께 있다는 것만으로 판정하면
-    남의 훅(예: reindex-hook.sh)까지 지워 버린다. rei 실행 파일이나
-    reigame 모듈을 hook 인자로 부르는 명령만 우리 것으로 본다.
-    """
-    for h in entry.get("hooks", []):
-        cmd = str(h.get("command", ""))
-        if re.search(r"(?:^|[/\s])(?:eva|rei)(?:\.py)?\s+hook(?:\s|$)", cmd):
-            return True
-        if re.search(r"(?:reigame|nervterm)\\s+hook(?:\s|$)", cmd):
-            return True
-    return False
-
-
-def load(target):
+def load(target: Path) -> dict:
     if not target.exists():
         return {}
     try:
         return json.loads(target.read_text(encoding="utf-8"))
-    except Exception as exc:
+    except Exception as exc:                                  # noqa: BLE001
         sys.exit(f"{target} 을 읽을 수 없습니다: {exc}")
 
 
-def install(cfg, remove=False):
+def merge(cfg: dict, agent, *, remove=False):
+    """훅을 병합한다. 바뀐 내용의 설명 목록을 돌려준다."""
     hooks = cfg.setdefault("hooks", {})
     changed = []
-    for event, matcher in WANTED.items():
+    for event, matcher in wanted_for(agent).items():
         arr = hooks.setdefault(event, [])
         before = len(arr)
-        arr[:] = [e for e in arr if not is_ours(e)]      # 항상 먼저 정리(중복 방지)
+        # 항상 먼저 우리 것을 걷어낸다 — 여러 번 실행해도 중복되지 않게.
+        arr[:] = [e for e in arr if not agents.is_our_hook(e)]
         if before != len(arr):
-            changed.append(f"  - {event}: 기존 레이 훅 제거")
+            changed.append(f"  - {event}: 기존 EVA 훅 제거")
         if remove:
             if not arr:
                 hooks.pop(event, None)
@@ -75,34 +74,32 @@ def install(cfg, remove=False):
         if matcher:
             entry["matcher"] = matcher
         arr.append(entry)
-        changed.append(f"  + {event}: 레이 훅 추가"
+        changed.append(f"  + {event}: EVA 훅 추가"
                        + (f" (matcher: {matcher[:30]}…)" if matcher else ""))
     if remove and not hooks:
         cfg.pop("hooks", None)
     return changed
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--uninstall", action="store_true")
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--global", dest="managed", action="store_true",
-                    help="모든 사용자에게 적용 (managed-settings, root 필요)")
-    args = ap.parse_args()
-
-    target = MANAGED if args.managed else SETTINGS
-    if args.managed and not args.dry_run and os.geteuid() != 0:
-        sys.exit("--global 은 root 권한이 필요합니다:  sudo python3 install-hooks.py --global")
-
-    cfg = load(target)
+def survey(cfg: dict):
+    """보존될 남의 훅 목록."""
     kept = []
-    for ev, arr in (cfg.get("hooks") or {}).items():
+    for event, arr in (cfg.get("hooks") or {}).items():
+        if not isinstance(arr, list):
+            continue
         for e in arr:
-            if not is_ours(e):
-                for h in e.get("hooks", []):
-                    kept.append(f"  · {ev}: {str(h.get('command'))[:70]}")
+            if agents.is_our_hook(e):
+                continue
+            for h in (e or {}).get("hooks", []):
+                kept.append(f"  · {event}: {str(h.get('command'))[:70]}")
+    return kept
 
-    changed = install(cfg, remove=args.uninstall)
+
+def apply_to(target: Path, agent, args) -> None:
+    print(f"\n═══ {agent.label}  →  {target}")
+    cfg = load(target)
+    kept = survey(cfg)
+    changed = merge(cfg, agent, remove=args.uninstall)
 
     print("기존 훅 (그대로 보존됨):")
     print("\n".join(kept) if kept else "  (없음)")
@@ -111,11 +108,11 @@ def main():
 
     if args.dry_run:
         print("\n--dry-run 이므로 저장하지 않았습니다.")
-        return 0
+        return
 
     if target.exists():
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        bak = target.with_suffix(f".json.eva-{stamp}.bak")
+        bak = target.with_suffix(f"{target.suffix}.eva-{stamp}.bak")
         shutil.copy2(target, bak)
         print(f"\n백업: {bak}")
 
@@ -123,11 +120,56 @@ def main():
     target.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
                       encoding="utf-8")
     if args.managed:
-        os.chmod(target, 0o644)   # 모든 사용자의 Claude Code 가 읽어야 한다
+        os.chmod(target, 0o644)   # 모든 사용자의 에이전트가 읽어야 한다
     print(f"저장: {target}")
+
     if not args.uninstall:
-        scope = "모든 사용자의" if args.managed else ""
-        print(f"\n{scope} 새 Claude Code 세션부터 적용됩니다.")
+        if agent.id == "codex":
+            # Codex 는 새 훅을 신뢰할지 물어본다. 모르면 훅이 조용히
+            # 안 도는 것처럼 보이므로 미리 알려 준다.
+            print("\n  Codex 는 다음 실행 때 이 훅을 신뢰할지 묻습니다.")
+            print("  승인해야 재화가 적립됩니다.")
+        print(f"\n{agent.label} 의 새 세션부터 적용됩니다.")
+
+
+def enable_in_settings(agent_ids, on=True) -> None:
+    """게임 설정에도 켜 준다 — 훅만 깔고 세션을 안 읽으면 반쪽이다."""
+    try:
+        from nervterm import settings
+        for aid in agent_ids:
+            settings.put(f"agents.{aid}", on)
+    except Exception as exc:                                  # noqa: BLE001
+        print(f"  (설정 갱신 실패: {exc})")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--agent", default="claude",
+                    choices=["claude", "codex", "all"],
+                    help="어느 에이전트에 설치할지 (기본: claude)")
+    ap.add_argument("--uninstall", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--global", dest="managed", action="store_true",
+                    help="모든 사용자에게 적용 (Claude 만, root 필요)")
+    args = ap.parse_args()
+
+    if args.managed and args.agent != "claude":
+        sys.exit("--global 은 Claude 에만 쓸 수 있습니다.")
+    if args.managed and not args.dry_run and os.geteuid() != 0:
+        sys.exit("--global 은 root 권한이 필요합니다:  "
+                 "sudo python3 install-hooks.py --global")
+
+    picked = (["claude", "codex"] if args.agent == "all" else [args.agent])
+    for aid in picked:
+        agent = agents.get(aid)
+        target = MANAGED if args.managed else agent.hook_path()
+        apply_to(target, agent, args)
+
+    if not args.dry_run:
+        enable_in_settings(picked, on=not args.uninstall)
+        print()
+        print("게임 설정의 '재화를 적립할 에이전트' 도 함께 "
+              + ("껐습니다." if args.uninstall else "켰습니다."))
     return 0
 
 
