@@ -8,6 +8,18 @@ import argparse
 import os
 import sys
 
+# 훅 모드는 **아무것도 무겁게 임포트하기 전에** 갈라진다.
+#
+# 훅은 도구 호출마다 프로세스로 새로 뜬다. 여기서 game·menu·ui·플러그인을
+# 통째로 끌어오면 그 비용이 모든 도구 호출에 붙는다. 실제로 그렇게
+# 만들었다가 훅 한 번이 71ms 에서 86ms 가 됐다.
+#
+# 이 분기가 함수 안이 아니라 모듈 최상단에 있어야 하는 이유가 그것이다.
+# main() 안에서 갈라 봐야 임포트는 이미 다 끝난 뒤다.
+if len(sys.argv) > 1 and sys.argv[1] == "hook":
+    from .hook import main as _hook_main
+    sys.exit(_hook_main())
+
 from . import (characters, db, economy, game, menu, plugins, settings, term,
                ui, world)
 from .ui import view as V
@@ -151,10 +163,7 @@ def play(con, char, args) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) > 1 and sys.argv[1] == "hook":
-        from .hook import main as hook_main
-        return hook_main()
-
+    # 훅 모드는 위 모듈 최상단에서 이미 갈라져 나갔다.
     args = parse()
     if args.plugins:
         return show_plugins()

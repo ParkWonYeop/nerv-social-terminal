@@ -40,7 +40,8 @@ def _run(payload: dict) -> None:
     sid = payload.get("session_id", "") or ""
 
     with db.session() as con:
-        db.init(con)
+        # 캐릭터 데이터는 안 쓴다 — 플러그인을 읽지 않는다.
+        db.init(con, with_characters=False)
 
         if event in ("PostToolUse", "PostToolUseFailure"):
             tool = payload.get("tool_name", "") or ""
@@ -62,7 +63,8 @@ def _run(payload: dict) -> None:
 
         elif event == "SessionStart":
             # 방치는 캐릭터마다 따로 서운해한다
-            settled = [economy.settle_neglect(con, char=c) for c in db.CHARS]
+            settled = [economy.settle_neglect(con, char=c)
+                       for c in db.known_chars(con)]
             streak, bonus = economy.roll_day(con)
             economy.touch_activity(con)
             _debug(f"SessionStart neglect={settled} streak={streak}/+{bonus}")

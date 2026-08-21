@@ -111,7 +111,7 @@ def on_tool(con, *, tool: str, tool_input: dict, tool_response, ok: bool,
         db.daily_bump(con, "fails", 1)
         streak = db.bump(con, "fail_streak", 1)
         if streak > 0 and streak % config.AFF_FAIL_STREAK == 0:
-            for c in db.CHARS:
+            for c in db.known_chars(con):
                 apply(con, aff=config.AFF_FAIL_PENALTY, kind="fail_streak",
                       reason=f"{streak}회 연속 도구 실패",
                       session_id=session_id, char=c)
@@ -135,7 +135,7 @@ def on_tool(con, *, tool: str, tool_input: dict, tool_response, ok: bool,
     if why:
         # 두 사람 다 같은 단말 기록을 본다 — 전원에게 반영
         from . import recall
-        for c in db.CHARS:
+        for c in db.known_chars(con):
             apply(con, aff=config.AFF_DANGER_PENALTY, kind="danger",
                   reason=why, session_id=session_id, char=c)
             # 위험한 짓은 호감보다 신뢰를 더 크게 깎는다.
@@ -151,7 +151,7 @@ def on_tool(con, *, tool: str, tool_input: dict, tool_response, ok: bool,
     if bare and _COMMIT.search(bare):
         db.daily_bump(con, "commits", 1)
         base += config.COMMIT_BONUS
-        for c in db.CHARS:
+        for c in db.known_chars(con):
             apply(con, aff=config.AFF_COMMIT, kind="commit",
                   reason="커밋", session_id=session_id, char=c)
             stance.move(con, "trust", config.TRUST_COMMIT, char=c)
