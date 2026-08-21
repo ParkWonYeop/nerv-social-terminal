@@ -15,7 +15,13 @@
 
 ## 対人同調端末 — 取扱説明書
 
-`極秘` · `取扱注意` · `文書番号 NERV-TB-0301` · `改訂 02`
+`極秘` · `取扱注意` · `文書番号 NERV-TB-0301` · `改訂 03`
+
+![NERV](https://img.shields.io/badge/NERV-INTERNAL_USE_ONLY-d2565a?style=flat-square)
+![Python](https://img.shields.io/badge/python-3.9+-9ec5e0?style=flat-square)
+![TUI](https://img.shields.io/badge/TUI-rich-e0764a?style=flat-square)
+![Agents](https://img.shields.io/badge/Claude_Code-·_Codex-a98bd0?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-62-8fbf9a?style=flat-square)
 
 </div>
 
@@ -692,5 +698,17 @@ python3 tests/keys.py     # 입력 시험 18건 (의사 터미널)
 ```
 
 **[부품 제작 규격서 →](docs/plugins.md)**
+
+---
+
+이 프로젝트는 팬 워크입니다. 비상업적 목적으로만 사용합니다.
+
+《신세기 에반게리온》의 등장인물과 설정의 권리는 **카라(khara) / 가이낙스**에 있습니다.
+《Re:제로부터 시작하는 이세계 생활》의 등장인물과 설정의 권리는
+**나가츠키 타페이 / KADOKAWA**에 있습니다.
+
+동봉된 인격 모형과 세계 설정은 해당 저작물을 참조해 작성된 2차 창작물입니다.
+
+**「…또 올 거야?」**
 
 </div>
