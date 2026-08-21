@@ -93,3 +93,22 @@ def use(world_id: str):
 def available():
     """고를 수 있는 세계관 목록."""
     return plugins.by_kind("world")
+
+
+def mismatches():
+    """지금 세계관과 안 맞는 캐릭터들. [(캐릭터, 팩이 전제한 세계관)]
+
+    캐릭터 팩은 자기가 전제하는 세계를 선언한다. 다른 세계를 골라 두면
+    프롬프트에 엉뚱한 설정이 들어간다 — 에밀리아가 자기더러 제3신동경시에
+    있다고 듣는 식이다. 막지는 않는다(섞어 쓰고 싶을 수도 있다).
+    다만 모르고 그러는 일은 없어야 한다.
+    """
+    from . import characters
+    here = active().id
+    out = []
+    for cid in characters.ENABLED:
+        plug = plugins.get("character", characters.pack_of(cid))
+        want = plug.world if plug is not None else ""
+        if want and want != here:
+            out.append((cid, want))
+    return out

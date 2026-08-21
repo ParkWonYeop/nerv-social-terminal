@@ -1,0 +1,12 @@
+[plugin]
+id = "rezero-characters"
+kind = "character"
+name = "Re:제로부터 시작하는 이세계 생활"
+version = "1.0.0"
+api = 1
+entry = "characters.py"
+description = "에밀리아 — 은발의 하프엘프, 제42대 왕선 후보."
+author = "ParkWonYeop"
+
+[character]
+world = "rezero"

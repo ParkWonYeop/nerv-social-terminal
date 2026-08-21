@@ -100,6 +100,75 @@ def _():
     raise AssertionError("빠진 감정 색을 잡지 못했다")
 
 
+@check("동봉 캐릭터 팩이 전부 계약을 지킨다")
+def _():
+    from nervterm import characters, plugins, spec
+    characters.load(refresh=True)
+    eq(characters.LOAD_ERRORS, [], "로드 오류")
+    for cid in characters.IDS:
+        spec.validate_character(characters.get(cid))
+    # 팩이 전제하는 세계관이 실제로 설치돼 있어야 한다
+    for pack_id in characters.PACKS:
+        plug = plugins.get("character", pack_id)
+        if plug is not None and plug.world:
+            true(plugins.get("world", plug.world) is not None,
+                 f"{pack_id} 가 전제한 세계관 '{plug.world}' 가 없다")
+
+
+@check("에밀리아 — 팩이 제대로 실린다")
+def _():
+    from nervterm import characters
+    characters.load(refresh=True)
+    true("emilia" in characters.IDS, "에밀리아가 없다")
+    e = characters.get("emilia")
+    eq(characters.pack_of("emilia"), "rezero-characters", "팩")
+    eq(len(e.gifts), 12, "선물 수")
+    eq(len(e.dates), 10, "데이트 수")
+    # 세계관 텍스트가 CORE 에 섞이면 안 된다 — 세계는 world 플러그인 몫이다
+    for word in ("NERV", "제3신동경시", "오퍼레이터"):
+        true(word not in e.core, f"CORE 에 다른 세계 텍스트가 있다: {word}")
+    # 리제로 고유 설정이 실제로 들어 있는지
+    for word in ("하프엘프", "팩", "왕선", "사테라"):
+        true(word in e.core, f"CORE 에 '{word}' 가 없다")
+
+
+@check("세계관 — 리제로 세계가 실린다")
+def _():
+    from nervterm import settings, world
+    settings.put("plugins.world", "rezero")
+    try:
+        w = world.load(refresh=True)
+        eq(w.id, "rezero", "세계관 id")
+        eq(w.currency_name, "동화", "재화 이름")
+        true("로즈월" in w.player_role, "플레이어 역할")
+        block = w.prompt_block("에밀리아")
+        true("루그니카" in block, "세계 설명")
+        true("NERV" not in block, "다른 세계가 섞였다")
+    finally:
+        settings.put("plugins.world", "nerv")
+        world.load(refresh=True)
+
+
+@check("세계관 — 캐릭터와 안 맞으면 알려 준다")
+def _():
+    from nervterm import characters, settings, world
+    settings.put("plugins.world", "nerv")
+    characters.load(refresh=True)
+    world.load(refresh=True)
+    bad = dict(world.mismatches())
+    true("emilia" in bad, "에밀리아 불일치를 못 잡았다")
+    eq(bad["emilia"], "rezero", "전제 세계관")
+
+    settings.put("plugins.world", "rezero")
+    world.load(refresh=True)
+    bad2 = dict(world.mismatches())
+    true("emilia" not in bad2, "맞는데도 불일치라고 한다")
+    true("rei" in bad2, "이번엔 레이가 불일치여야 한다")
+
+    settings.put("plugins.world", "nerv")
+    world.load(refresh=True)
+
+
 @check("세계관 — 재화 이름이 플러그인에서 온다")
 def _():
     from nervterm import world

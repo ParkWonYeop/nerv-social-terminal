@@ -107,6 +107,12 @@ def plugin_problems():
         out.append(ui.LOAD_ERROR)
     if world.LOAD_ERROR:
         out.append(world.LOAD_ERROR)
+    for cid, want in world.mismatches():
+        char = characters.get(cid)
+        name = char.full if char else cid
+        # 조사를 붙이지 않는다 — 이름의 받침에 따라 은/는이 갈린다.
+        out.append(f"{name} — '{want}' 세계를 전제하는 인물. 지금 세계는 "
+                   f"'{world.active().id}' 다 (설정 → 세계관)")
     return out
 
 
