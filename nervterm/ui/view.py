@@ -196,15 +196,21 @@ class HelpView:
 # ═══════════════════════════════════════════════════════════════════════
 @dataclass
 class MenuItem:
-    key: str                       # 사용자가 입력할 것 ("1", "back")
+    key: str                       # 고르면 돌아올 값
     label: str
     value: str = ""                # 오른쪽에 뜨는 현재 값
-    note: str = ""                 # 아래 줄 설명
+    note: str = ""                 # 커서가 놓였을 때 아래 줄 설명
     tone: str = "plain"
     disabled: bool = False
     disabled_reason: str = ""
     action: Optional[Callable] = None
     payload: Any = None
+
+    # 고르면 자유 입력으로 넘어간다. 입력한 글자가 typed 에 담겨 돌아온다.
+    # 데이트 선택지의 "직접 입력" 이 이걸 쓴다.
+    input_mode: bool = False
+    input_prompt: str = "  > "
+    typed: str = ""
 
 
 @dataclass
@@ -213,5 +219,12 @@ class MenuView:
     items: list = field(default_factory=list)
     subtitle: str = ""
     notes: list = field(default_factory=list)      # (tone, text)
-    hint: str = "번호를 고른다.  b 뒤로  ·  q 나감"
+    hint: str = "↑↓ 고르고 Enter.  Esc 뒤로"
     back_key: str = "b"
+    # 화면에 한 번에 보일 줄 수. 넘으면 스크롤한다.
+    max_rows: int = 12
+    # 커서를 처음 어디에 둘지
+    start: int = 0
+    # 화면을 지우고 그릴지. 대화 중에 뜨는 선택기는 False —
+    # 위에 쌓인 대화를 지워 버리면 무슨 상황인지 알 수 없다.
+    clear: bool = True

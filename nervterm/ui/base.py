@@ -163,57 +163,61 @@ class BaseUI:
             ("settings", None)   설정 화면
             ("quit", None)       나간다
         """
-        console.clear()
-        self.blank()
-        if sv.terminal_name:
-            console.print(Text(f"  {sv.terminal_name}", style=self.color("warn")))
-        console.print(Text("  인증됨.", style=self.dim_color))
-        self.blank()
-        for tone, text in sv.notes:
-            self.line(text, tone)
-        if sv.notes:
-            self.blank()
+        items = []
+        for card in sv.cards:
+            items.append(V.MenuItem(
+                key=card.id,
+                label=f"{term.pad(card.full, 22)}{term.pad(card.ja, 26)}",
+                value=f"호감 {card.affection:>3}  [{card.stage}]",
+                note="", payload=("char", card.id)))
+        if not items:
+            items.append(V.MenuItem(
+                key="-", label="만날 수 있는 사람이 없다", disabled=True,
+                disabled_reason="설정에서 캐릭터를 켜거나 플러그인을 설치하라"))
+        items.append(V.MenuItem(key="settings", label="설정",
+                                tone="warn", payload=("settings", None)))
+        items.append(V.MenuItem(key="quit", label="나간다",
+                                tone="dim", payload=("quit", None)))
 
-        if not sv.cards:
-            self.line("만날 수 있는 사람이 없다.", "danger")
-            self.dim("설정에서 캐릭터를 켜거나, 캐릭터 플러그인을 설치하라.")
-        else:
-            console.print(Text("  누구를 만나러 왔나.", style="white"))
-            self.blank()
-            for i, card in enumerate(sv.cards, 1):
-                accent = card.color or self.main
-                row = Text("    ")
-                row.append(f"{i}. ", style=self.color("warn"))
-                row.append(term.pad(card.full, 22), style=f"bold {accent}")
-                row.append(term.pad(card.ja, 26), style=self.dim_color)
-                row.append(f"호감 {card.affection:>3}", style="white")
-                row.append(f"  [{card.stage}]", style=accent)
-                console.print(row)
+        got = self.choose(V.MenuView(
+            title=sv.terminal_name or "단말",
+            subtitle="인증됨.  누구를 만나러 왔나.",
+            items=items, notes=list(sv.notes),
+            hint="↑↓ 고르고 Enter.  Esc/q 나감",
+            max_rows=14))
+        if got is None or got.payload is None:
+            return ("quit", None)
+        return got.payload
 
-        self.blank()
-        console.print(Text("    s. ", style=self.color("warn")) +
-                      Text("설정", style="white") +
-                      Text("      q. ", style=self.color("warn")) +
-                      Text("나간다", style="white"))
-        self.blank()
-
-        while True:
-            raw = term.ask_line("  고른다 > ", rgb=(111, 119, 131))
-            if raw is None:
-                return ("quit", None)
-            raw = raw.strip().lower()
-            if not raw:
-                continue
-            if raw in ("q", "quit", "exit", "나감"):
-                return ("quit", None)
-            if raw in ("s", "설정", "settings", "config"):
-                return ("settings", None)
-            if raw.isdigit() and 1 <= int(raw) <= len(sv.cards):
-                return ("char", sv.cards[int(raw) - 1].id)
-            for card in sv.cards:
-                if raw in (card.id, card.name.lower(), card.full.lower()):
-                    return ("char", card.id)
-            self.dim("그런 사람은 여기 없다.")
+    # ── 상점 고르기 ────────────────────────────────────────────────────
+    def choose_shop(self, sv: V.ShopView):
+        """선물·데이트를 골라서 ShopRow 를 돌려준다. 취소면 None."""
+        items = []
+        for row in sv.rows:
+            mark = f"  (준 적 있음 ×{row.given})" if row.given else ""
+            items.append(V.MenuItem(
+                key=row.key, label=row.name + mark,
+                value=f"{sv.currency_symbol} {row.price}",
+                tone="plain" if row.affordable else "dim",
+                disabled=not row.affordable,
+                disabled_reason=f"{sv.currency_symbol} {row.price} 필요 — "
+                                f"보유 {sv.currency_symbol} {sv.money}",
+                note=f"이름: {row.key}",
+                payload=row))
+        for row in sv.locked:
+            items.append(V.MenuItem(
+                key=row.key, label=row.name,
+                value=f"호감 {row.need} 필요",
+                disabled=True,
+                disabled_reason=f"아직 열리지 않았다 (호감 {row.need} 필요)",
+                payload=row))
+        if not items:
+            return None
+        got = self.choose(V.MenuView(
+            title=sv.title,
+            subtitle=f"보유 {sv.currency_symbol} {sv.money:,}",
+            items=items, hint="↑↓ 고르고 Enter.  Esc 취소", max_rows=12))
+        return got.payload if got is not None else None
 
     # ── 상태창 프레임 ──────────────────────────────────────────────────
     def header(self, st: V.Status):
@@ -536,44 +540,187 @@ class BaseUI:
         for note in hv.notes:
             self.dim(note)
 
-    # ── 메뉴 (설정 화면 전부) ──────────────────────────────────────────
-    def menu(self, mv: V.MenuView):
-        """메뉴 하나를 그리고 고른 항목의 key 를 돌려준다.
+    # ── 선택기 ─────────────────────────────────────────────────────────
+    #
+    # 화살표로 움직이고 Enter 로 고른다. 게임 안의 모든 선택이 이걸 쓴다 —
+    # 캐릭터 선택, 설정, 선물, 데이트, 데이트 중의 행동 선택지까지.
+    #
+    # TTY 가 아니면(파이프·시험) 목록을 찍고 줄 입력으로 떨어진다.
+    # 번호나 항목 이름을 받는다.
+    CURSOR = "▸"
+    LABEL_WIDTH = 26
 
-        돌려주는 값: 항목의 key / mv.back_key / "quit" / None(취소)
+    def choose(self, mv: V.MenuView):
+        """항목 하나를 고른다.
+
+        돌려주는 값: 고른 MenuItem / None(취소).
+        input_mode 항목을 골랐으면 item.typed 에 입력한 글자가 담긴다.
         """
-        console.clear()
+        if not mv.items:
+            return None
+        if not term.is_tty():
+            return self._choose_by_line(mv)
+        return self._choose_by_arrow(mv)
+
+    # ── 화살표 ─────────────────────────────────────────────────────────
+    def _choose_by_arrow(self, mv: V.MenuView):
+        idx = max(0, min(mv.start, len(mv.items) - 1))
+        top = 0
+        window = max(1, min(mv.max_rows, len(mv.items)))
+        drawn = 0
+
+        if mv.clear:
+            console.clear()
+        self._chooser_head(mv)
+        try:
+            with term.cursor_hidden():
+                while True:
+                    top = self._window_top(idx, top, window, len(mv.items))
+                    if drawn:
+                        term.clear_lines(drawn)
+                    drawn = self._chooser_body(mv, idx, top, window)
+
+                    key = term.read_key()
+                    if key is None:                  # TTY 를 잃었다
+                        return self._choose_by_line(mv)
+                    if key in (term.KEY_UP, "k"):
+                        idx = (idx - 1) % len(mv.items)
+                    elif key in (term.KEY_DOWN, "j"):
+                        idx = (idx + 1) % len(mv.items)
+                    elif key == term.KEY_PGUP:
+                        idx = max(0, idx - window)
+                    elif key == term.KEY_PGDN:
+                        idx = min(len(mv.items) - 1, idx + window)
+                    elif key == term.KEY_HOME:
+                        idx = 0
+                    elif key == term.KEY_END:
+                        idx = len(mv.items) - 1
+                    elif key in (term.KEY_ESC, term.KEY_LEFT):
+                        return None
+                    elif key == term.KEY_ENTER:
+                        item = mv.items[idx]
+                        if item.disabled:
+                            continue          # 사유는 이미 화면에 떠 있다
+                        if item.input_mode:
+                            return self._ask_typed(item)
+                        return item
+                    elif isinstance(key, str) and key.isdigit() and key != "0":
+                        want = int(key) - 1
+                        if want < len(mv.items):
+                            idx = want
+                    elif isinstance(key, str) and key.lower() == "q":
+                        return None
+        except KeyboardInterrupt:
+            console.print()
+            return None
+
+    def _window_top(self, idx, top, window, total):
+        """커서가 창 밖으로 나가지 않게 창을 민다."""
+        if idx < top:
+            return idx
+        if idx >= top + window:
+            return idx - window + 1
+        return max(0, min(top, max(0, total - window)))
+
+    def _chooser_head(self, mv):
+        """선택하는 동안 바뀌지 않는 부분. 한 번만 그린다."""
         self.blank()
-        console.print(Text(f"  {mv.title}", style=f"bold {self.main}"))
+        if mv.title:
+            console.print(Text(f"  {mv.title}", style=f"bold {self.main}"))
         if mv.subtitle:
             console.print(Text(f"  {mv.subtitle}", style=self.dim_color))
-        self.blank()
-
+        if mv.title or mv.subtitle:
+            self.blank()
         for tone, text in mv.notes:
             self.line(text, tone)
         if mv.notes:
             self.blank()
 
+    def _chooser_body(self, mv, idx, top, window):
+        """커서에 따라 다시 그리는 부분. 그린 줄 수를 돌려준다."""
+        rows = 0
+        avail = max(20, console.width - 6)
+
+        if top > 0:
+            console.print(Text("    ⋯", style=self.dim_color))
+            rows += 1
+
+        for i in range(top, min(top + window, len(mv.items))):
+            console.print(self._chooser_row(mv.items[i], i == idx, avail))
+            rows += 1
+
+        if top + window < len(mv.items):
+            console.print(Text("    ⋯", style=self.dim_color))
+            rows += 1
+
+        # 커서가 놓인 항목의 설명 — 항상 한 줄을 차지해 높이를 고정한다
+        cur = mv.items[idx]
+        detail = cur.disabled_reason if cur.disabled else cur.note
+        console.print(Text("    " + term.truncate(detail or "", avail),
+                           style=self.color("danger") if cur.disabled
+                           else self.dim_color))
+        rows += 1
+
+        self.blank()
+        console.print(Text("  " + mv.hint, style=self.dim_color))
+        rows += 2
+        return rows
+
+    def _chooser_row(self, item, selected, avail):
+        """한 줄. 반드시 한 줄이어야 한다 — 넘치면 잘라 낸다."""
+        t = Text()
+        if selected:
+            t.append(f"  {self.CURSOR} ", style=f"bold {self.main}")
+        else:
+            t.append("    ", style=self.dim_color)
+
+        if item.disabled:
+            label_style = self.dim_color
+        elif selected:
+            label_style = (f"bold {self.color(item.tone)}"
+                           if item.tone != "plain" else "bold white")
+        else:
+            label_style = (self.color(item.tone)
+                           if item.tone != "plain" else "white")
+
+        label = term.pad(item.label, self.LABEL_WIDTH) if item.value \
+            else item.label
+        room = avail - term.width(item.value) - 2
+        t.append(term.truncate(label, max(8, room)), style=label_style)
+        if item.value:
+            t.append(item.value,
+                     style=self.dim_color if item.disabled else self.main)
+        return t
+
+    def _ask_typed(self, item):
+        """input_mode 항목 — 직접 입력을 받는다."""
+        self.blank()
+        got = term.ask_line(item.input_prompt, rgb=(201, 138, 43))
+        if not got:
+            return None
+        item.typed = got.strip()
+        return item if item.typed else None
+
+    # ── 줄 입력 대체 (비 TTY) ──────────────────────────────────────────
+    def _choose_by_line(self, mv: V.MenuView):
+        if mv.clear:
+            console.clear()
+        self._chooser_head(mv)
         keyed = {}
-        for item in mv.items:
+        for i, item in enumerate(mv.items, 1):
+            keyed[str(i)] = item
             keyed[item.key.lower()] = item
             row = Text("    ")
-            if item.disabled:
-                row.append(f"{item.key}. ", style=self.dim_color)
-                row.append(term.pad(item.label, 26), style=self.dim_color)
-            else:
-                row.append(f"{item.key}. ", style=self.color("warn"))
-                row.append(term.pad(item.label, 26),
-                           style=self.color(item.tone)
-                           if item.tone != "plain" else "white")
+            row.append(f"{i}. ", style=self.color("warn")
+                       if not item.disabled else self.dim_color)
+            row.append(term.pad(item.label, self.LABEL_WIDTH),
+                       style="white" if not item.disabled else self.dim_color)
             if item.value:
-                row.append(item.value, style=self.main if not item.disabled
-                           else self.dim_color)
+                row.append(item.value, style=self.dim_color)
             console.print(row)
             detail = item.disabled_reason if item.disabled else item.note
             if detail:
                 console.print(Text("       " + detail, style=self.dim_color))
-
         self.blank()
         self.dim(mv.hint)
         self.blank()
@@ -583,12 +730,8 @@ class BaseUI:
             if raw is None:
                 return None
             raw = raw.strip().lower()
-            if not raw:
+            if not raw or raw in ("q", "quit", "나감", mv.back_key):
                 return None
-            if raw in ("q", "quit", "나감"):
-                return "quit"
-            if raw == mv.back_key:
-                return mv.back_key
             item = keyed.get(raw)
             if item is None:
                 self.dim("그런 항목은 없다.")
@@ -597,7 +740,18 @@ class BaseUI:
                 self.line(item.disabled_reason or "지금은 고를 수 없다.",
                           "danger")
                 continue
-            return item.key
+            if item.input_mode:
+                return self._ask_typed(item)
+            return item
+
+    # ── 메뉴 (설정 화면 전부) ──────────────────────────────────────────
+    def menu(self, mv: V.MenuView):
+        """설정 메뉴. 고른 항목의 key 를 돌려준다.
+
+        돌려주는 값: 항목의 key / mv.back_key / "quit" / None(취소)
+        """
+        got = self.choose(mv)
+        return got.key if got is not None else None
 
     def confirm(self, prompt, phrase) -> bool:
         """되돌릴 수 없는 것의 확인. 정확히 phrase 를 쳐야 통과."""

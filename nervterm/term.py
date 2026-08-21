@@ -174,6 +174,116 @@ def ask_line(prompt, *, rgb=(111, 119, 131), default=""):
     return raw or default
 
 
+# ── 한 키 읽기 ─────────────────────────────────────────────────────────
+#
+# 목록에서 화살표로 고르려면 줄 단위가 아니라 키 단위로 읽어야 한다.
+# 읽는 동안만 raw 모드로 바꾸고 곧바로 되돌린다 — 계속 raw 로 두면
+# Ctrl+C 나 화면 갱신이 이상해진다.
+KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT = "up", "down", "left", "right"
+KEY_ENTER, KEY_ESC, KEY_TAB = "enter", "esc", "tab"
+KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN = "home", "end", "pgup", "pgdn"
+KEY_BACKSPACE = "backspace"
+
+_CSI = {
+    "A": KEY_UP, "B": KEY_DOWN, "C": KEY_RIGHT, "D": KEY_LEFT,
+    "H": KEY_HOME, "F": KEY_END,
+}
+_CSI_TILDE = {"1": KEY_HOME, "4": KEY_END, "5": KEY_PGUP, "6": KEY_PGDN,
+              "7": KEY_HOME, "8": KEY_END}
+
+
+def read_key(timeout=None):
+    """키 하나. 방향키·엔터·ESC 는 이름으로, 나머지는 글자 그대로.
+
+    TTY 가 아니면 None — 호출부가 줄 입력으로 떨어진다.
+    Ctrl+C 는 KeyboardInterrupt 로 올린다(raw 모드에서는 신호가 안 온다).
+    """
+    if not is_tty():
+        return None
+    import select
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    try:
+        old = termios.tcgetattr(fd)
+    except termios.error:
+        return None
+    try:
+        tty.setraw(fd)
+        if timeout is not None:
+            if not select.select([sys.stdin], [], [], timeout)[0]:
+                return None
+        ch = sys.stdin.read(1)
+        if ch == "\x03":
+            raise KeyboardInterrupt
+        if ch in ("\r", "\n"):
+            return KEY_ENTER
+        if ch == "\t":
+            return KEY_TAB
+        if ch in ("\x7f", "\b"):
+            return KEY_BACKSPACE
+        if ch == "\x04":
+            return KEY_ESC              # Ctrl+D 도 취소로 본다
+        if ch != "\x1b":
+            return ch
+
+        # ESC — 뒤에 아무것도 없으면 ESC 단독, 있으면 이스케이프 시퀀스.
+        # 짧게 기다려 본다. 이걸 안 하면 ESC 키가 먹히지 않는다.
+        if not select.select([sys.stdin], [], [], 0.05)[0]:
+            return KEY_ESC
+        second = sys.stdin.read(1)
+        if second not in ("[", "O"):
+            return KEY_ESC
+        third = sys.stdin.read(1)
+        if third in _CSI:
+            return _CSI[third]
+        if third.isdigit():
+            # \x1b[5~ 같은 것. ~ 까지 읽어 버린다.
+            digits = third
+            while select.select([sys.stdin], [], [], 0.05)[0]:
+                nxt = sys.stdin.read(1)
+                if nxt == "~" or not nxt.isdigit():
+                    break
+                digits += nxt
+            return _CSI_TILDE.get(digits[0], KEY_ESC)
+        return KEY_ESC
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        except termios.error:
+            pass
+
+
+def clear_lines(n: int) -> None:
+    """커서를 n 줄 올리고 그 아래를 지운다. 제자리 갱신용."""
+    if n <= 0:
+        return
+    sys.stdout.write(f"\x1b[{n}A\r\x1b[J")
+    sys.stdout.flush()
+
+
+def hide_cursor() -> None:
+    if is_tty():
+        sys.stdout.write("\x1b[?25l")
+        sys.stdout.flush()
+
+
+def show_cursor() -> None:
+    if is_tty():
+        sys.stdout.write("\x1b[?25h")
+        sys.stdout.flush()
+
+
+@contextmanager
+def cursor_hidden():
+    hide_cursor()
+    try:
+        yield
+    finally:
+        show_cursor()
+
+
 def confirm_phrase(prompt, phrase, *, rgb=(210, 86, 90)):
     """되돌릴 수 없는 작업의 확인. 정확히 phrase 를 타이핑해야 True.
 
