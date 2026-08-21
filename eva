@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# EVA 단말 — 런처
+#
+# ~/.local/bin/eva 로 심볼릭 링크해도 된다. readlink -f 가 링크를 풀어
+# 실제 설치 위치를 찾는다.
+set -u
+
+target="$0"
+# readlink -f 가 없는 환경(일부 BSD)을 위한 대비
+if command -v readlink >/dev/null 2>&1 && readlink -f / >/dev/null 2>&1; then
+    target="$(readlink -f "$0")"
+else
+    while [ -L "$target" ]; do target="$(readlink "$target")"; done
+fi
+root="$(cd "$(dirname "$target")" && pwd)"
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 가 필요하다." >&2
+    exit 1
+fi
+if ! python3 -c "import rich" 2>/dev/null; then
+    echo "rich 모듈이 필요하다:  python3 -m pip install --user rich" >&2
+    exit 1
+fi
+
+cd "$root" || exit 1
+# 저장소가 공용 위치(/opt/rei)에 있을 수 있다. 바이트코드 캐시는
+# 각자의 홈에 쓴다 — 남의 디렉터리에 쓰려다 실패하지 않도록.
+export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rei/pycache"
+exec python3 -m reigame "$@"

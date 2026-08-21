@@ -1,0 +1,10 @@
+# 개인 플레이 데이터 — 절대 커밋하지 않는다
+data/
+*.db
+*.db-wal
+*.db-shm
+*.bak
+
+# 파이썬
+__pycache__/
+*.pyc
