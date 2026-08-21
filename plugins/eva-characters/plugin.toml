@@ -1,0 +1,14 @@
+[plugin]
+id = "eva-characters"
+kind = "character"
+name = "신세기 에반게리온"
+version = "1.0.0"
+api = 1
+entry = "characters.py"
+description = "아야나미 레이 · 소류 아스카 랑그레이 · 카츠라기 미사토"
+author = "ParkWonYeop"
+
+[character]
+# 이 팩이 전제하는 세계관. 설정에서 세계관을 따로 고르지 않았으면
+# 이걸 쓴다 — 팩을 설치하는 것만으로 맞는 조합이 되도록.
+world = "nerv"
