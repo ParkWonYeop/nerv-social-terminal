@@ -20,8 +20,14 @@ if len(sys.argv) > 1 and sys.argv[1] == "hook":
     from .hook import main as _hook_main
     sys.exit(_hook_main())
 
-from . import (characters, db, economy, game, menu, plugins, settings, term,
-               ui, world)
+# 상태줄 위젯도 같은 이유로 여기서 갈라진다. Claude Code 가 화면을
+# 갱신할 때마다 도니 훅보다도 자주 뜬다.
+if len(sys.argv) > 1 and sys.argv[1] == "line":
+    from .widget import main as _widget_main
+    sys.exit(_widget_main())
+
+from . import (characters, db, economy, game, menu, plugins, recall, settings,
+               stance, term, ui, world)
 from .ui import view as V
 
 
@@ -162,8 +168,79 @@ def play(con, char, args) -> str:
             ui.notice(f"모르는 명령: /{cmd}   (/help)", "danger")
 
 
+def say_once(words) -> int:
+    """TUI 를 띄우지 않고 한 마디 건네고 답만 받는다.
+
+    Claude Code 안에서 `! eva say 안녕` 으로 쓴다. 전체화면을 열지 않으니
+    작업하던 화면이 그대로 남는다. 상태줄 위젯과 짝이다.
+    """
+    text = " ".join(words).strip()
+    if not text:
+        print("무슨 말을 할까?  예:  eva say 오늘 좀 힘들었어")
+        return 1
+
+    w = world.load()
+    ui.load(w)
+    if not characters.IDS:
+        print("설치된 캐릭터가 없다.")
+        return 1
+
+    with db.session() as con:
+        db.init(con)
+        economy.roll_day(con)
+        # 마지막으로 만난 상대. 없으면 첫 번째.
+        cid = db.get(con, "widget_char", char="") or ""
+        char = characters.get(cid) if cid in characters.IDS else None
+        if char is None:
+            char = characters.first_enabled()
+        db.set_char(char.id)
+        ui.set_character(char)
+
+        g = game.Game(con, char, offline=False, animate=False)
+        st = g.state()
+        boring = stance.check_boring(con, text)
+        db.say(con, "user", text, "", g.sess)
+
+        with ui.thinking(char.name):
+            got = g.ask(st, f"[상대가 방금 한 말]\n{text}\n\n"
+                            f"{char.name}로서 응답하라.",
+                        query=text, boring=boring)
+
+        # 화면에 그리지 않고 DB 반영만 하고, 답만 찍는다
+        if got.get("narration"):
+            ui.dim(got["narration"])
+        ui.console.print(ui.entry_text(V.LogEntry("rei", got["line"],
+                                                  got.get("emotion", ""))))
+        if got.get("inner"):
+            ui.console.print(ui.entry_text(V.LogEntry("inner", got["inner"])))
+
+        db.say(con, "rei", got["line"], got.get("emotion", ""), g.sess)
+        if got.get("affection_delta"):
+            economy.apply(con, aff=got["affection_delta"], kind="talk",
+                          reason=got["line"][:60])
+        moved = stance.apply_response(con, got)
+        bits = []
+        if got.get("affection_delta"):
+            bits.append(("호감", got["affection_delta"]))
+        for f in ("trust", "interest", "patience"):
+            if moved.get(f):
+                bits.append((game.Game.LABEL[f], moved[f]))
+        if bits:
+            ui.console.print(ui.entry_text(V.LogEntry(
+                "delta", " · ".join(f"{n} {'+' if d > 0 else ''}{d}"
+                                    for n, d in bits))))
+        if got.get("memory"):
+            recall.remember(con, "fact", got["memory"])
+        db.bump(con, "turns", 1)
+        g.remember_for_widget()
+        con.commit()
+    return 0
+
+
 def main() -> int:
-    # 훅 모드는 위 모듈 최상단에서 이미 갈라져 나갔다.
+    # 훅·위젯 모드는 위 모듈 최상단에서 이미 갈라져 나갔다.
+    if len(sys.argv) > 1 and sys.argv[1] == "say":
+        return say_once(sys.argv[2:])
     args = parse()
     if args.plugins:
         return show_plugins()

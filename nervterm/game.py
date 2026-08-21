@@ -115,6 +115,20 @@ class Game:
         """흐르는 출력(목록·기록 화면) 시작 — 프레임이 깨졌음을 표시."""
         self.framed = False
 
+    def remember_for_widget(self):
+        """Claude Code 상태줄 위젯이 읽을 값을 갱신한다.
+
+        위젯은 속도 때문에 플러그인을 읽지 않는다. 그래서 표시에 필요한
+        이름·색·단계·재화를 여기서 적어 둔다.
+        """
+        from . import widget
+        try:
+            aff = db.geti(self.con, "affection")
+            stage, _, _ = characters.stage_of(self.char, aff)
+            widget.remember(self.con, self.char, world.active(), stage)
+        except Exception:                                     # noqa: BLE001
+            pass          # 위젯 때문에 게임이 멈추면 안 된다
+
     LABEL = {"trust": "신뢰", "interest": "관심", "patience": "인내"}
 
     def speak(self, got, *, kind="talk"):
@@ -147,6 +161,7 @@ class Game:
         if got.get("memory"):
             recall.remember(self.con, "fact", got["memory"])
         db.bump(self.con, "turns", 1)
+        self.remember_for_widget()
         self.con.commit()
         self.redraw(animate=self.animate)
 

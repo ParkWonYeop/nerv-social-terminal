@@ -133,6 +133,68 @@ def apply_to(target: Path, agent, args) -> None:
         print(f"\n{agent.label} 의 새 세션부터 적용됩니다.")
 
 
+WIDGET_CMD = f"{sys.executable} {ROOT / 'nervterm' / 'widget.py'}"
+
+
+def is_our_statusline(cfg) -> bool:
+    got = (cfg.get("statusLine") or {}).get("command", "")
+    return "nervterm/widget.py" in str(got) or "nervterm.widget" in str(got)
+
+
+def apply_statusline(args) -> None:
+    """Claude Code 터미널 하단에 상태줄 위젯을 붙인다.
+
+    남의 상태줄이 이미 있으면 덮지 않는다. 상태줄은 하나뿐이라
+    덮으면 그 사람이 쓰던 게 사라진다.
+    """
+    target = Path.home() / ".claude" / "settings.json"
+    print(f"\n═══ 상태줄 위젯  →  {target}")
+    cfg = load(target)
+    existing = cfg.get("statusLine")
+
+    if args.uninstall:
+        if not existing:
+            print("  (설치돼 있지 않다)")
+            return
+        if not is_our_statusline(cfg):
+            print("  남의 상태줄이다. 건드리지 않는다:")
+            print(f"    {str(existing.get('command'))[:70]}")
+            return
+        cfg.pop("statusLine", None)
+        print("  - 상태줄 제거")
+    else:
+        if existing and not is_our_statusline(cfg):
+            print("  이미 다른 상태줄이 설정돼 있다. 덮지 않는다:")
+            print(f"    {str(existing.get('command'))[:70]}")
+            print("  바꾸려면 ~/.claude/settings.json 의 statusLine 을 지우고")
+            print("  다시 실행하라.")
+            return
+        cfg["statusLine"] = {
+            "type": "command",
+            "command": WIDGET_CMD,
+            "padding": 0,
+        }
+        print(f"  + 상태줄 추가")
+        print(f"    {WIDGET_CMD}")
+
+    if args.dry_run:
+        print("\n  --dry-run 이므로 저장하지 않았습니다.")
+        return
+
+    if target.exists():
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        bak = target.with_suffix(f"{target.suffix}.eva-{stamp}.bak")
+        shutil.copy2(target, bak)
+        print(f"  백업: {bak}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
+                      encoding="utf-8")
+    print(f"  저장: {target}")
+    if not args.uninstall:
+        print("\n  새 Claude Code 세션부터 하단에 뜬다.")
+        print("  한 번은 eva 를 켜서 상대를 골라야 표시할 것이 생긴다.")
+
+
 def enable_in_settings(agent_ids, on=True) -> None:
     """게임 설정에도 켜 준다 — 훅만 깔고 세션을 안 읽으면 반쪽이다."""
     try:
@@ -152,6 +214,10 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--global", dest="managed", action="store_true",
                     help="모든 사용자에게 적용 (Claude 만, root 필요)")
+    ap.add_argument("--statusline", action="store_true",
+                    help="Claude Code 터미널 하단에 상태줄 위젯도 붙인다")
+    ap.add_argument("--only-statusline", action="store_true",
+                    help="상태줄만 설치하고 훅은 건드리지 않는다")
     args = ap.parse_args()
 
     if args.managed and args.agent != "claude":
@@ -160,11 +226,18 @@ def main() -> int:
         sys.exit("--global 은 root 권한이 필요합니다:  "
                  "sudo python3 install-hooks.py --global")
 
+    if args.only_statusline:
+        apply_statusline(args)
+        return 0
+
     picked = (["claude", "codex"] if args.agent == "all" else [args.agent])
     for aid in picked:
         agent = agents.get(aid)
         target = MANAGED if args.managed else agent.hook_path()
         apply_to(target, agent, args)
+
+    if args.statusline or args.uninstall:
+        apply_statusline(args)
 
     if not args.dry_run:
         enable_in_settings(picked, on=not args.uninstall)

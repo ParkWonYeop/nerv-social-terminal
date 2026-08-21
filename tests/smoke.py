@@ -592,6 +592,69 @@ def _():
     eq(order[0].name, "new.jsonl", "오래된 파일을 먼저 읽는다")
 
 
+@check("상태줄 위젯 — 캐시를 읽어 한두 줄을 그린다")
+def _():
+    from nervterm import characters, db, widget, world
+    characters.load(refresh=True)
+    w = world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("rei")
+        db.set_char(char.id)
+        db.put(con, "affection", 42, char=char.id)
+        db.put(con, "lcl", 1234)
+        db.say(con, "rei", "…그래.", "neutral", "s", char=char.id)
+        widget.remember(con, char, w, "관심")
+        con.commit()
+    got = widget.render()
+    true(bool(got), "아무것도 안 그렸다")
+    true("레이" in got, "이름이 없다")
+    true("42" in got, "호감이 없다")
+    true("그래" in got, "마지막 대사가 없다")
+    true(len(got.splitlines()) == 2, "두 줄이어야 한다")
+
+
+@check("상태줄 위젯 — 데이터가 없으면 조용히 아무것도 안 그린다")
+def _():
+    from nervterm import widget
+    old = os.environ.get("NERV_DATA")
+    os.environ["NERV_DATA"] = str(Path(_TMP) / "없는폴더")
+    try:
+        eq(widget.render(), "", "없는 저장소에서 뭔가 그렸다")
+    finally:
+        if old:
+            os.environ["NERV_DATA"] = old
+
+
+@check("상태줄 위젯 — 게임 모듈을 끌어오지 않는다")
+def _():
+    # 위젯은 Claude Code 가 화면을 갱신할 때마다 돈다. rich·플러그인을
+    # 임포트하면 그 비용이 매번 붙는다.
+    import subprocess
+    code = ("import sys; sys.path.insert(0, %r);"
+            "import nervterm.widget;"
+            "bad=[m for m in ('rich','nervterm.plugins','nervterm.game',"
+            "'nervterm.characters','nervterm.ui') if m in sys.modules];"
+            "print(','.join(bad))" % str(ROOT))
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                         text=True, timeout=30).stdout.strip()
+    eq(out, "", f"무거운 모듈이 딸려 왔다: {out}")
+
+
+@check("상태줄 설치 — 남의 상태줄을 덮지 않는다")
+def _():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_installhooks", ROOT / "install-hooks.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    true(mod.is_our_statusline(
+        {"statusLine": {"command": "/x/nervterm/widget.py"}}), "우리 것 판별")
+    true(not mod.is_our_statusline(
+        {"statusLine": {"command": "/usr/local/bin/other.sh"}}), "남의 것 판별")
+    true(not mod.is_our_statusline({}), "없을 때")
+
+
 @check("훅 판별 — 남의 훅을 우리 것으로 오인하지 않는다")
 def _():
     from nervterm.agents import is_our_hook
