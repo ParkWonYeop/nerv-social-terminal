@@ -1,22 +1,23 @@
 # NERV Social Terminal
 
-**아야나미 레이 · 소류 아스카 랑그레이 · 카츠라기 미사토** — 터미널에서 도는 프롬프트형 미연시.
+**터미널에서 도는 프롬프트형 미연시.** 기본으로 아야나미 레이 · 소류 아스카 랑그레이 · 카츠라기 미사토가 들어 있다.
 
-시작 화면에서 만나러 갈 상대를 고른다. 호감도·신뢰·기억·선물은 캐릭터별로 완전히 분리되고, 재화(LCL)와 근무 기록은 공유된다. 커밋·위험 명령 같은 단말 기록은 세 사람 모두 보고 있다.
+시작 화면에서 만나러 갈 상대를 고른다. 호감도·신뢰·기억·선물은 캐릭터별로 완전히 분리되고, 재화와 근무 기록은 공유된다. 커밋·위험 명령 같은 단말 기록은 세 사람 모두 보고 있다.
 
-**이 서버에서 실제로 한 Claude Code 작업이 그대로 게임 재화가 된다.**
+**훅이 설치된 에이전트에서 실제로 한 작업이 그대로 게임 재화가 된다.** Claude Code 와 Codex 를 지원한다.
 
 플레이어는 NERV 제1지부 기술부 오퍼레이터다. 파일을 고치고 커밋하는 근무 실적이 LCL로 쌓이고, 그걸로 그녀들을 만나러 간다.
 
+캐릭터도 화면도 세계관도 **플러그인이다.** 다른 사람을 데려오거나 화면을 통째로 갈아끼울 수 있다 → [플러그인 만들기](docs/plugins.md)
+
 ## 설치
 
-새 서버라면 클론부터:
-
 ```bash
-sudo git clone https://github.com/ParkWonYeop/nerv-social-terminal /opt/nerv-social-terminal
-sudo chown -R $USER /opt/nerv-social-terminal      # 또는 공용 관리 계정
-/opt/nerv-social-terminal/install.sh
+git clone https://github.com/ParkWonYeop/nerv-social-terminal ~/nerv-social-terminal
+~/nerv-social-terminal/install.sh
 ```
+
+공용 서버라면 `/opt/nerv-social-terminal` 에 두고 `sudo chown -R $USER` 해도 된다.
 
 `install.sh` 는 `~/.local/bin/eva` 심볼릭 링크를 걸고 내 계정에 훅을 설치한다.
 기존 훅은 보존하고 자동 백업한다. 여러 번 실행해도 중복되지 않는다.
@@ -27,7 +28,24 @@ sudo chown -R $USER /opt/nerv-social-terminal      # 또는 공용 관리 계정
 ```
 
 의존성은 python3 와 rich 뿐이다 (`apt install python3-rich` 또는 `pip install rich`).
-대사 생성에는 `claude` CLI 가 있으면 쓰고, 없으면 오프라인 대사로 돈다.
+
+### 어느 에이전트에서 재화를 벌 것인가
+
+```bash
+python3 install-hooks.py                  # Claude Code (기본)
+python3 install-hooks.py --agent codex    # Codex
+python3 install-hooks.py --agent all      # 둘 다
+python3 install-hooks.py --dry-run        # 미리보기
+```
+
+두 에이전트의 훅 스키마가 같아서 설치 코드도 하나다. 들어가는 파일만 다르다:
+
+| | 훅 설정 | 세션 기록 |
+|---|---|---|
+| Claude Code | `~/.claude/settings.json` | `~/.claude/projects/*/*.jsonl` |
+| Codex | `~/.codex/hooks.json` | `~/.codex/sessions/**/rollout-*.jsonl` |
+
+Codex 는 새 훅을 처음 볼 때 신뢰할지 묻는다. 승인해야 적립된다.
 
 ### 서버 전체에 설치 (모든 사용자 자동 적용)
 
@@ -60,17 +78,30 @@ eva
 
 ## 어떻게 도는가
 
-| 층 | 하는 일 |
+코어는 **관계가 어떻게 움직이는가**만 안다. 누구를 만나는지, 어떤 세상인지, 어떻게 보이는지는 플러그인이 정한다.
+
+| 코어 | 하는 일 |
 |---|---|
-| **훅** (`nervterm/hook.py`) | Claude Code의 PostToolUse / Stop / SessionStart / SessionEnd 를 받아 LCL·호감도를 적립. 항상 exit 0, stdout 안 건드림 |
+| **훅** (`hook.py`) | 에이전트의 PostToolUse / Stop / SessionStart / SessionEnd 를 받아 재화·호감도를 적립. 항상 exit 0, stdout 안 건드림 |
 | **규칙 엔진** (`economy.py`) | 즉시 판정 — 도구 보상, 커밋 보너스, 연속 실패, 방치, 위험 명령 |
-| **캐릭터** (`characters.py` + `llm.py` + `persona.py`) | 캐릭터 정의(성격·선물·데이트)와 대화 반응·호감도 판정 (`claude -p` 헤드리스) |
-| **근무 일지** (`work.py`) | 트랜스크립트를 증분으로 읽어 "무슨 작업을 했는지" 추출. LLM 안 씀 |
+| **에이전트** (`agents.py`) | 어느 에이전트의 훅을 어디에 깔고, 세션 기록을 어떻게 읽는지 |
+| **근무 일지** (`work.py`) | 세션 기록을 증분으로 읽어 "무슨 작업을 했는지" 추출. LLM 안 씀 |
+| **대사 생성** (`llm/`) | 프로바이더 추상화 + 과금 안전장치 |
 | **기억** (`recall.py`) | 관련성 기반 회상, 중복 병합, 오래된 대화 압축 |
-| **화면** (`ui.py`) | rich 기반 TUI |
 | **관계** (`stance.py`) | 캐릭터가 이 상대를 어떻게 여기는지. 네 축 + 인상 + 걸리는 것 |
+| **프롬프트** (`persona.py`) | 캐릭터 + 세계관 + 지금 상황 + 출력 규칙을 조립 |
+| **게임 루프** (`game.py`) | 무엇을 보여줄지 정하고 뷰 모델을 만든다. 색도 좌표도 없다 |
+| **설정** (`settings.py` · `menu.py`) | 환경변수 > 설정파일 > 기본값 |
 | **신원** (`identity.py`) | 터미널 로그인 사용자로 상대를 구분 |
-| **저장** (`db.py`) | `~/.local/share/nerv-social-terminal/rei.db` (SQLite, WAL). 사용자별·캐릭터별 분리, 첫 실행 때 자동 생성·마이그레이션 |
+| **저장** (`db.py`) | `~/.local/share/nerv-social-terminal/rei.db` (SQLite, WAL). 사용자별·캐릭터별 분리, 자동 마이그레이션 |
+
+| 플러그인 | 정하는 것 | 동시에 |
+|---|---|---|
+| **캐릭터** (`plugins/eva-characters/`) | 페르소나·단계·선물·데이트 | 여러 개 |
+| **세계관** (`plugins/nerv-world/`) | 재화 이름, 플레이어의 역할 | 하나 |
+| **화면** (`plugins/nerv-ui/`) | 색·연출·화면 배치 | 하나 |
+
+만드는 법은 [docs/plugins.md](docs/plugins.md). `plugins/plain-ui/` 가 짧은 예제다.
 
 ## 상대는 누구인가 — 사용자별 분리
 
@@ -103,6 +134,8 @@ eva
 | 연속 접속 | +10 × 연속일 | |
 
 하루 상한 2,000 LCL (파밍 방지).
+
+**어느 에이전트에서 일했는지는 상관없다.** 훅이 설치돼 있으면 Claude Code 든 Codex 든 똑같이 쌓인다. 지갑은 하나다.
 
 ## 레이는 비위를 맞추지 않는다
 
@@ -178,20 +211,24 @@ eva
 
 ## 레이는 무엇을 알고 있는가
 
-`~/.claude/projects/*.jsonl` 을 **증분으로** 읽는다. 읽은 바이트 위치를 기억하므로 재스캔은 3ms 정도다. LLM을 쓰지 않고, Claude Code가 이미 저장해 둔 것을 줍는다:
+켜 둔 에이전트의 세션 기록을 **증분으로** 읽는다. 읽은 바이트 위치를 기억하므로 재스캔은 몇 ms 다. LLM을 쓰지 않고, 에이전트가 이미 저장해 둔 것을 줍는다.
 
-| 출처 | 무엇 |
-|---|---|
-| `ai-title` | 세션마다 자동 생성된 제목 — 가장 좋은 요약 |
-| Bash `description` | 각 명령이 무엇을 하려던 것인지 |
-| `promptSource: typed` | 사람이 실제로 타이핑한 프롬프트 |
-| `Edit`/`Write` 의 `file_path` | 건드린 파일 |
-| `git commit -m` | 커밋 메시지 |
-| `cwd` / `gitBranch` | 어느 프로젝트에서 일했나 |
+| 무엇 | Claude Code | Codex |
+|---|---|---|
+| 요약 | `ai-title` (자동 생성 제목) | 없음 — 프롬프트로 대신한다 |
+| 사람이 친 프롬프트 | `promptSource: "typed"` | `event_msg:user_message` |
+| 하려던 작업 | Bash 의 `description` | `update_plan` 의 각 단계 |
+| 건드린 파일 | `Edit`/`Write` 의 `file_path` | `patch_apply_end` 의 `changes` |
+| 커밋 메시지 | `git commit -m` | `exec_command` 안의 `git commit -m` |
+| 어디서 일했나 | `cwd` / `gitBranch` | `session_meta` / `turn_context` 의 `cwd` |
 
 `/work` 로 레이가 보고 있는 것을 그대로 확인할 수 있다.
 
-**게임이 스스로 띄운 `claude -p` 세션은 걸러진다.** 사람이 타이핑한 프롬프트가 있는 세션의 제목만 인정하므로, 레이가 자기 대사를 근무 실적으로 착각하지 않는다.
+**게임이 스스로 띄운 세션은 걸러진다.** Claude 쪽은 사람이 타이핑한 프롬프트가 있는 세션의 제목만 인정하고, Codex 쪽은 `--ephemeral` 로 돌아 세션 파일 자체가 안 남는다. 레이가 자기 대사를 근무 실적으로 착각하지 않는다.
+
+**하네스가 주입한 메시지도 걸러진다.** Codex 는 승인 판정용으로 `"The following is the Codex agent history…"` 를 사용자 메시지처럼 밀어 넣는데, 실제 기록에서 이게 사용자 메시지의 **대부분**이었다. 안 거르면 레이가 그 영문 텍스트를 근무 실적으로 읊는다.
+
+**최근 파일부터 읽는다.** 한 번에 4MB 씩만 읽는데, 여기 Codex 기록이 4.2GB 였다. 오래된 것부터 읽으면 '오늘 한 일' 에 닿기까지 천 번을 실행해야 한다. 오래된 파일은 그냥 안 읽힌 채 남는다 — 반년 전 작업이 지금 대화에 나올 일은 없다.
 
 레이는 이 기록을 읊지 않는다. 하나만 골라 짧게 건드린다:
 
@@ -239,14 +276,92 @@ eva
 /status            관계 상태, 레이의 판단, 근무 기록, 변화 내역
 /memory            레이가 기억하는 것들 (♥ = 중요도)
 /work              레이가 단말로 보고 있는 근무 기록
-/clear  /help  /quit
+/clear  /help
+/quit              시작 화면으로 (거기서 q 로 나감, s 로 설정)
+/exit              바로 종료
 ```
 
 데이트는 2막이다. 레이가 장면을 만들고 선택지 3개를 준다 — 하나는 무난하게, 하나는 깊이 다가가되 위험하게, 하나는 거리를 둔다. 번호 대신 직접 입력해도 된다.
 
+## 설정
+
+시작 화면에서 `s`. 또는 `eva --settings`.
+
+```
+1. 대화                      하루 대사 생성 상한, 연출, 타이핑 속도
+2. LLM 연결                  캐릭터가 어느 모델로 말하는가
+3. 캐릭터                    누구를 만날 수 있게 할지
+4. 화면 (UI 플러그인)        바꾸면 다시 시작한다
+5. 세계관                    재화 이름, 플레이어의 역할
+6. 재화를 적립할 에이전트    Claude Code / Codex
+9. 초기화                    관계·기억·재화를 지운다
+```
+
+**캐릭터를 꺼도 관계는 남는다.** 다시 켜면 그대로 이어진다. 끈 사람도 근무 기록과 위험 명령은 계속 본다 — 같은 단말이니까.
+
+초기화는 범위를 나눠 두었다. 관계만 다시 시작하고 싶은 사람이 근무 기록까지 잃으면 안 되니까.
+
+| | 지워지는 것 | 남는 것 |
+|---|---|---|
+| 이 사람과의 관계만 | 한 명의 호감·기억·선물 기록 | 나머지 전부 |
+| 모든 관계 | 전원의 호감·기억·대화 | 재화·근무 기록 |
+| 전부 | 재화·근무 기록·장부까지 | 없음 |
+| 설정만 | 설정 파일 | 플레이 데이터 |
+
+되돌릴 수 없는 것은 y/n 이 아니라 **문장을 타이핑**해야 넘어간다. 손가락이 먼저 움직이는 걸 막으려고.
+
+어느 것이든 **이 플레이어의 것만** 지운다. 홈을 공유해도 남의 기록은 건드리지 않는다.
+
+## 캐릭터가 어느 모델로 말하는가
+
+설정 → **LLM 연결**. 재화 적립과는 무관하다 — 그건 훅이 하고, 이건 대사만 만든다.
+
+| 프로바이더 | 돈 | 비고 |
+|---|---|---|
+| Claude Code (구독 좌석) | 없음 | 기본값. `claude` 로그인 계정의 플랜 한도 |
+| Codex (구독 좌석) | 없음 | `codex` 로그인 계정의 플랜 한도 |
+| Ollama (로컬) | 없음 | 내 기계에서 돈다. 느리지만 공짜 |
+| Codex — 로컬 모델 (`--oss`) | 없음 | codex 가 ollama / LM Studio 로 |
+| OpenAI 호환 서버 | 주소에 따라 | LM Studio · vLLM · llama.cpp |
+| Anthropic API (키) | **있음** | 토큰당 청구 |
+| OpenAI API (키) | **있음** | 토큰당 청구 |
+
+### 계정 한도와 API 과금은 다른 것이다
+
+이 구분이 안전장치의 전부다.
+
+- **구독 좌석** — `claude` / `codex` 에 로그인한 계정으로 돈다. 토큰당 청구가 없다. 대신 플랜의 5시간·주간 한도를 코딩 작업과 나눠 쓴다.
+- **API 키** — 토큰당 돈이 나간다. 구독과는 **별개의 지갑**이다.
+- **로컬** — 전기 말고는 안 든다.
+
+### 과금 안전장치
+
+기본으로 켜져 있다. 켜져 있는 동안 유료 프로바이더는 **고를 수조차 없다.** 목록에는 보이지만 잠겨 있다.
+
+경고만 띄우고 마는 건 안전장치가 아니라서, 실제로 막는다:
+
+- 가드가 켜져 있으면 유료 프로바이더 선택이 거부된다
+- 설정 파일을 손으로 고쳐 유료로 바꿔 놔도, 게임이 켜질 때 기본값으로 되돌린다
+- 끄려면 `과금을 허용한다` 라고 **문장을 타이핑**해야 한다
+- 끈 뒤에도 **하루 호출 상한**(기본 50회)이 남는다. 넘으면 돈을 더 쓰지 않고 사전 작성 대사로 떨어진다
+- 헤더에 `대사 12/200 · 과금` 이라고 계속 떠 있다
+
+API 키는 **설정 파일에 저장하지 않는다.** '어느 환경변수에서 읽을지' 이름만 저장한다. 저장소를 통째로 복사·백업하는 사람이 있으니까.
+
+OpenAI 호환 서버는 주소로 판단한다. `localhost` 나 사설망이면 무료로 보고, 바깥 주소면 과금으로 본다 — 모르면 안전한 쪽으로.
+
+### 로컬 모델은 느리다
+
+이 기계에서 `qwen3:14b` 로 한 턴에 **57초** 걸렸다. 그래서 프로바이더마다 기다리는 시간을 따로 잡아 두었다(로컬 240초, Codex 120초, Claude 45초). 안 그러면 로컬을 고른 사람은 매번 조용히 폴백 대사만 보게 된다.
+
+작은 모델도 JSON 은 잘 지킨다 — 부탁하는 대신 스키마를 문법 수준에서 강제하기 때문이다(ollama 의 `format`, OpenAI 계열의 구조화 출력, codex 의 `--output-schema`).
+
+
 ## 비용
 
-`claude -p` 는 이 서버의 **OAuth 팀 플랜 좌석**으로 돈다. 검증한 것:
+기본 설정(Claude Code 구독 좌석)에서의 이야기다. 다른 프로바이더를 골랐다면 [위](#캐릭터가-어느-모델로-말하는가)를 보라.
+
+`claude -p` 는 **OAuth 플랜 좌석**으로 돈다. 검증한 것:
 
 ```
 subscriptionType : team
@@ -273,7 +388,9 @@ extra usage 설정을 확인하는 게 확실하다.
 - 대화 압축은 30줄 넘게 쌓였을 때 접속당 **최대 1회**
 - `./eva --offline` — LLM 0회. 규칙과 사전 대사만으로 플레이
 
-한도는 `REI_DAILY_LLM_CALLS` 환경변수(또는 `nervterm/config.py` 의 `DAILY_LLM_CALLS`)로 조정한다.
+한도는 설정 화면의 **대화 → 하루 대사 생성 상한** 에서 바꾼다. `NERV_DAILY_LLM_CALLS` 환경변수로 이번 실행만 덮을 수도 있다.
+
+플랜 한도를 아예 안 쓰고 싶으면 **Ollama** 로 바꾸면 된다. 느리지만 공짜고, 플랜도 안 건드린다.
 
 ## 옵션
 
@@ -282,7 +399,14 @@ eva --offline       LLM 없이. 플랜 한도를 아끼고 싶을 때
 eva --no-anim       타이핑 연출 끄기 (SSH 가 느릴 때)
 eva --status        게임을 켜지 않고 기록만 확인
 eva --char asuka    선택 화면 없이 바로 아스카에게
+eva --settings      설정 화면으로 바로
+eva --ui plain      이번 실행만 다른 화면으로
+eva --plugins       설치된 플러그인 확인
 ```
+
+환경변수로도 덮을 수 있다 (저장된 설정보다 우선한다 — 일회성 실행을 위해):
+`NERV_UI` · `NERV_WORLD` · `NERV_LLM_PROVIDER` · `NERV_LLM_MODEL` ·
+`NERV_DAILY_LLM_CALLS` · `NERV_DATA` · `REI_PLAYER` · `NERV_PLUGIN_PATH`
 
 ## 오탐에 주의
 
@@ -293,29 +417,42 @@ eva --char asuka    선택 화면 없이 바로 아스카에게
 
 둘 다 명령 문자열을 통째로 정규식에 넣은 탓이었다. 지금은 **인용부호와 heredoc 본문을 벗기고, 명령 위치(줄 시작 · `|` · `;` · `&&` 뒤)에서만** 판정한다.
 
+Codex 를 붙이면서 하나 더 나왔다. `git commit -m "$(cat <<'EOF' … EOF)"` 로 커밋하면 정규식이 잡는 건 메시지가 아니라 그걸 만드는 셸 명령이라, 레이가 커밋 제목으로 `$(cat <<'EOF'…` 를 읊었다. 지금은 그런 모양이면 버린다.
+
 그래도 규칙 기반이라 완벽하지 않다. `/status` 에 이상한 감점이 보이면 `ledger` 테이블에 사유가 남아 있으니 확인하면 된다.
 
 ```bash
-sqlite3 ~/.local/share/rei/rei.db \
+sqlite3 ~/.local/share/nerv-social-terminal/rei.db \
   "SELECT ts,kind,delta_lcl,delta_aff,reason FROM ledger ORDER BY id DESC LIMIT 20"
 ```
 
 ## 훅 관리
 
 ```
-python3 install-hooks.py --dry-run     미리보기
-python3 install-hooks.py               설치 (기존 훅 보존, 자동 백업)
-python3 install-hooks.py --uninstall   제거
-REI_HOOK_DEBUG=1                       data/hook.log 에 훅 동작 기록
+python3 install-hooks.py --dry-run              미리보기
+python3 install-hooks.py                        Claude Code 에 설치
+python3 install-hooks.py --agent codex          Codex 에 설치
+python3 install-hooks.py --agent all            둘 다
+python3 install-hooks.py --uninstall            제거
+REI_HOOK_DEBUG=1                                hook.log 에 훅 동작 기록
 ```
 
-기존 ccsidekick 훅 옆에 나란히 붙는다. 덮어쓰지 않는다.
-게임이 띄우는 `claude` 프로세스에는 `REI_GAME=1` 이 붙어 훅이 스스로를 재발동시키지 않는다.
+기존 훅(ccsidekick, peon-ping 등) 옆에 나란히 붙는다. 덮어쓰지 않고 자동 백업한다.
+게임이 띄우는 에이전트에는 `NERV_GAME=1` 이 붙어 훅이 스스로를 재발동시키지 않는다.
+Codex 쪽은 `--ephemeral` 로 돌아 세션 파일 자체가 남지 않는다 — 캐릭터가 자기 대사를 근무 실적으로 착각할 길이 없다.
 
 ## 조정
 
 `nervterm/config.py` 에 보상·페널티·단계 기준이 모두 모여 있다.
-선물과 데이트 장소는 `nervterm/scenes.py`, 캐릭터 정의(성격·대사·선물·데이트)는 `nervterm/characters.py`, 프롬프트 조립은 `nervterm/persona.py`.
-기억 회상 점수와 중복 임계값은 `nervterm/recall.py`, 트랜스크립트 추출 규칙은 `nervterm/work.py`.
+캐릭터 정의(성격·대사·선물·데이트)는 `plugins/eva-characters/`, 프롬프트 조립은 `nervterm/persona.py`.
+기억 회상 점수와 중복 임계값은 `nervterm/recall.py`, 세션 기록 추출 규칙은 `nervterm/agents.py`.
 
-`REI_DEBUG=1` 을 붙이면 기억 압축 중 발생한 예외를 그대로 보여준다.
+`NERV_DEBUG=1` 을 붙이면 기억 압축·플러그인 로드 중 발생한 예외를 그대로 보여준다.
+
+### 테스트
+
+```bash
+python3 tests/smoke.py
+```
+
+의존성 없이 돈다. 임시 저장소를 써서 실제 플레이 데이터는 건드리지 않는다.

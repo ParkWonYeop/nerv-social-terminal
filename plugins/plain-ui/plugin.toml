@@ -1,0 +1,9 @@
+[plugin]
+id = "plain"
+kind = "ui"
+name = "민무늬 단말"
+version = "1.0.0"
+api = 1
+entry = "ui.py"
+description = "연출 없음. 느린 SSH·좁은 창·스크린리더용. UI 플러그인 예제이기도 하다."
+author = "ParkWonYeop"
