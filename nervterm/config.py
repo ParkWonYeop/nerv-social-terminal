@@ -28,15 +28,24 @@ LLM_DISALLOWED = (
     "Task Agent TodoWrite NotebookEdit Skill"
 )
 
-# 플랜 사용량 절약 장치.
-# claude -p 는 팀 플랜 좌석(OAuth)으로 돌기 때문에 별도 과금은 없지만
-# 5시간 창 / 주간 한도를 공유한다. 코딩 한도를 지키려고 상한을 둔다.
-# REI_DAILY_LLM_CALLS 환경변수로 바꿀 수 있다.
-try:
-    DAILY_LLM_CALLS = int(os.environ.get("REI_DAILY_LLM_CALLS", 200))
-except ValueError:
-    DAILY_LLM_CALLS = 200
-LLM_WARN_AT = int(DAILY_LLM_CALLS * 0.75)  # 넘으면 헤더에 경고 표시
+
+def daily_llm_calls() -> int:
+    """하루 대사 생성 상한. 설정 화면에서 바꾼다.
+
+    구독 좌석(claude/codex CLI)은 토큰 과금은 없지만 5시간 창·주간
+    한도를 코딩 작업과 공유한다. 그 한도를 지키려는 장치다.
+    유료 API 의 '돈' 상한은 이것과 별개다 — llm/guard.py 를 보라.
+    """
+    from . import settings
+    try:
+        return max(0, int(settings.get("daily_llm_calls", 200)))
+    except (TypeError, ValueError):
+        return 200
+
+
+def llm_warn_at() -> int:
+    """넘으면 헤더에 경고 색이 뜨는 지점."""
+    return int(daily_llm_calls() * 0.75)
 
 # ── 재화(LCL) 적립 ─────────────────────────────────────────────────────
 TOOL_REWARD = {

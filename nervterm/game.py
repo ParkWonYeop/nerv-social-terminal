@@ -1,16 +1,23 @@
 # -*- coding: utf-8 -*-
-"""게임 루프."""
+"""게임 루프.
+
+여기서는 '무엇을 보여줄지'만 정한다. '어떻게 보일지'는 UI 플러그인이
+정한다 — 그래서 이 파일에는 색도, 좌표도, rich 도 없다.
+화면에 뭔가를 내보낼 때는 언제나 뷰 모델(ui.view)을 만들어 넘긴다.
+"""
 import os
 import random
 import uuid
 
-from rich.text import Text
+from . import (characters, config, db, economy, llm, persona, recall, scenes,
+               settings, stance, ui, world)
+from .ui import view as V
 
-from . import (characters, config, db, economy, identity, llm, persona,
-               recall, scenes, stance, ui, work)
-
-HINT = [("/date", "데이트"), ("/gift", "선물"), ("/status", "기록"),
-        ("/memory", "기억"), ("/work", "일지"), ("/help", "?"), ("/quit", "나감")]
+HINT = [
+    V.Hint("/date", "데이트"), V.Hint("/gift", "선물"),
+    V.Hint("/status", "기록"), V.Hint("/memory", "기억"),
+    V.Hint("/work", "일지"), V.Hint("/help", "?"), V.Hint("/quit", "나감"),
+]
 
 
 class Game:
@@ -19,40 +26,57 @@ class Game:
         self.char = char
         self.offline = offline
         self.animate = animate
-        self.buf = []          # 화면에 보일 최근 로그 (role, text, emotion)
+        self.buf = []          # 화면에 보일 최근 로그 (V.LogEntry)
         self.framed = False    # 하단 고정 프레임이 화면에 그려져 있는가
         self.sess = uuid.uuid4().hex[:12]      # 이번 접속 식별자
+        self.typing = settings.get("typing_speed", 0.028)
         recall.ensure(con)
+        from . import work
+        self.work = work
         work.ensure(con)
         self.scan()
 
     def scan(self):
         """트랜스크립트에서 새로 쌓인 작업 기록을 읽어들인다(증분)."""
         try:
-            return work.scan(self.con)
+            return self.work.scan(self.con)
         except Exception:
             return 0
 
     # ── 상태 ───────────────────────────────────────────────────────────
-    def state(self):
+    def state(self) -> V.Status:
         con = self.con
         aff = db.geti(con, "affection")
         name, guide, idx = characters.stage_of(self.char, aff)
         row = db.daily_row(con)
-        return {
-            "affection": aff, "stage": name, "stage_guide": guide,
-            "stage_idx": idx, "lcl": db.geti(con, "lcl"),
-            "player": db.PLAYER,
-            "trust": db.geti(con, "trust"),
-            "interest": db.geti(con, "interest"),
-            "patience": db.geti(con, "patience"),
-            "mood": db.get(con, "mood") or "flat",
-            "tools": row["tools"] or 0, "edits": row["edits"] or 0,
-            "commits": row["commits"] or 0, "llm_used": row["llm"] or 0,
-            "llm_cap": config.DAILY_LLM_CALLS,
-            "streak": db.geti(con, "streak_days"),
-            "offline": self.offline,
-        }
+        w = world.active()
+        return V.Status(
+            player=db.PLAYER,
+            char_name=self.char.name,
+            char_full=self.char.full,
+            char_ja=self.char.display_ja,
+            char_en=self.char.display_en,
+            affection=aff,
+            trust=db.geti(con, "trust"),
+            interest=db.geti(con, "interest"),
+            patience=db.geti(con, "patience"),
+            stage=name, stage_idx=idx, stage_guide=guide,
+            mood=db.get(con, "mood") or "flat",
+            money=db.geti(con, "lcl"),
+            currency_name=w.currency_name,
+            currency_symbol=w.currency_symbol,
+            tools=row["tools"] or 0,
+            edits=row["edits"] or 0,
+            commits=row["commits"] or 0,
+            streak=db.geti(con, "streak_days"),
+            llm_used=row["llm"] or 0,
+            llm_cap=config.daily_llm_calls(),
+            llm_warn_at=config.llm_warn_at(),
+            provider_label=llm.provider_label(),
+            offline=self.offline,
+            billable=llm.is_billable(),
+            terminal_name=w.terminal_name,
+        )
 
     def context(self, st, extra="", *, query="", with_convo=True, boring=""):
         con = self.con
@@ -61,13 +85,14 @@ class Game:
             self.char,
             stance_block=stance.block(con, stance.read(con), self.char,
                                       boring=boring),
-            aff=st["affection"], stage_name=st["stage"],
-            stage_guide=st["stage_guide"], lcl=st["lcl"],
-            today_tools=st["tools"], today_commits=st["commits"],
+            aff=st.affection, stage_name=st.stage,
+            stage_guide=st.stage_guide, money=st.money,
+            currency=st.currency_name,
+            today_tools=st.tools, today_commits=st.commits,
             days_since=economy.days_since_active(con),
-            streak=st["streak"], memories=mems,
-            work_today=work.digest(con),
-            work_past=work.past_days(con, 3),
+            streak=st.streak, memories=mems,
+            work_today=self.work.digest(con),
+            work_past=self.work.past_days(con, 3),
             last_convo=recall.render(
                 recall.last_conversation(con, self.sess, 6), self.char.name),
             this_convo=recall.render(
@@ -78,11 +103,12 @@ class Game:
 
     # ── 출력 ───────────────────────────────────────────────────────────
     def push(self, role, text, emotion=""):
-        self.buf.append((role, text, emotion))
+        self.buf.append(V.LogEntry(role, text, emotion))
         self.buf = self.buf[-40:]
 
     def redraw(self, *, animate=False):
-        ui.frame(self.state(), self.buf, HINT, animate=animate)
+        ui.frame(self.state(), self.buf, HINT,
+                 animate=animate, delay=self.typing)
         self.framed = True
 
     def page(self):
@@ -92,7 +118,7 @@ class Game:
     LABEL = {"trust": "신뢰", "interest": "관심", "patience": "인내"}
 
     def speak(self, got, *, kind="talk"):
-        """레이의 발화를 화면·DB에 반영하고 관계 변화를 적용."""
+        """캐릭터의 발화를 화면·DB에 반영하고 관계 변화를 적용."""
         narration = got.get("narration", "")
         line, emotion = got.get("line", "…"), got.get("emotion", "neutral")
         inner, delta = got.get("inner", ""), got.get("affection_delta", 0)
@@ -124,7 +150,7 @@ class Game:
         self.con.commit()
         self.redraw(animate=self.animate)
 
-    # ── 레이에게 묻기 ──────────────────────────────────────────────────
+    # ── 캐릭터에게 묻기 ────────────────────────────────────────────────
     def ask(self, st, user_msg, *, extra_ctx="", clamp=3, query="",
             boring="", want_impression=False):
         sysp = persona.system_prompt(
@@ -137,18 +163,22 @@ class Game:
             return got
         return persona.fallback_response(self.con, st, self.char)
 
+    def _thinking(self):
+        return ui.thinking(self.char.name) if not self.offline else _null()
+
     # ── 명령 ───────────────────────────────────────────────────────────
     def consolidate(self):
         """쌓인 대화를 기억으로 압축. 접속당 최대 1회, LLM 1호출."""
         if self.offline:
             return 0
+
         def ask_fn(system, user):
             return llm.ask(self.con, system, user, offline=self.offline)
+
         try:
-            made = recall.consolidate(self.con, ask_fn,
-                                      name=self.char.name)
-        except Exception as exc:                              # noqa: BLE001
-            if os.environ.get("REI_DEBUG"):
+            made = recall.consolidate(self.con, ask_fn, name=self.char.name)
+        except Exception:                                     # noqa: BLE001
+            if os.environ.get("NERV_DEBUG") or os.environ.get("REI_DEBUG"):
                 import traceback
                 traceback.print_exc()
             else:
@@ -197,7 +227,7 @@ class Game:
             msg += (f"\n\n지난번에 만났을 때 {nm}의 첫 마디는 '{prev}' 였다. "
                     "같은 말도, 같은 소재도 반복하지 마라. 다른 것을 골라라.")
 
-        with ui.thinking() if not self.offline else _null():
+        with self._thinking():
             got = self.ask(st, msg, clamp=1,
                            want_impression=stance.wants_impression(self.con))
         if not got["narration"] and not self.offline:
@@ -230,34 +260,33 @@ class Game:
         msg = (f"[상대가 방금 한 말]\n{text}\n\n"
                f"{self.char.name}로서 응답하라.")
         want_imp = stance.wants_impression(self.con)
-        with ui.thinking() if not self.offline else _null():
+        with self._thinking():
             got = self.ask(st, msg, query=text, boring=boring,
                            want_impression=want_imp)
         self.speak(got)
 
+    # ── 선물 ───────────────────────────────────────────────────────────
     def show_gifts(self):
         st = self.state()
         self.page()
-        ui.console.print()
-        ui.notice("상점 — 선물")
+        rows = []
         for k, (name, price, need, _, _) in scenes.gift_list(
-                self.char.gifts, st["affection"]):
+                self.char.gifts, st.affection):
             owned = self.con.execute(
                 "SELECT given FROM owned WHERE player=? AND char=? AND item=?",
                 (db.PLAYER, self.char.id, k)).fetchone()
-            mark = f"  (준 적 있음 ×{owned['given']})" if owned and owned["given"] else ""
-            afford = ui.GOLD if st["lcl"] >= price else ui.DIM
-            ui.console.print(Text("    " + ui.pad(k, 11), style=ui.MAIN) +
-                             Text(ui.pad(name, 22), style="white") +
-                             Text(ui.pad(f"¤ {price}", 8), style=afford) +
-                             Text(mark, style=ui.DIM))
-        locked = scenes.locked_gifts(self.char.gifts, st["affection"])
-        if locked:
-            ui.console.print()
-            ui.dim("잠김: " + ", ".join(
-                f"{v[0]}(호감도 {v[2]})" for _, v in locked[:4]))
-        ui.console.print()
-        ui.dim("/gift <이름>  으로 건넨다.")
+            rows.append(V.ShopRow(
+                key=k, name=name, price=price, need=need,
+                affordable=st.money >= price,
+                given=(owned["given"] if owned else 0)))
+        locked = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
+                            locked=True)
+                  for k, v in scenes.locked_gifts(self.char.gifts,
+                                                  st.affection)]
+        ui.shop(V.ShopView(title="상점 — 선물", rows=rows, locked=locked,
+                           money=st.money,
+                           currency_symbol=st.currency_symbol,
+                           hint="/gift <이름>  으로 건넨다."))
 
     def gift(self, key):
         st = self.state()
@@ -266,27 +295,26 @@ class Game:
         item = self.char.gifts.get(key)
         if not item:
             self.page()
-            ui.notice(f"'{key}' 라는 물건은 없다.", ui.EYE)
+            ui.notice(f"'{key}' 라는 물건은 없다.", "danger")
             return
         name, price, need, base, meaning = item
-        if st["affection"] < need:
+        if st.affection < need:
             self.page()
-            ui.notice(f"아직 이걸 건넬 사이는 아니다. (호감 {need} 필요)", ui.EYE)
+            ui.notice(f"아직 이걸 건넬 사이는 아니다. (호감 {need} 필요)",
+                      "danger")
             return
         why = stance.refuses(self.con, need=need, what=name)
         if why:
             self.push("sys", f"{name} 을(를) 내밀었다. "
-                             f"({why} — LCL 은 쓰이지 않았다.)")
+                             f"({why} — {st.currency_name} 은 쓰이지 않았다.)")
             narr, line = stance.refusal_line(self.char, why)
-            self.speak({"narration": narr or f"{self.char.name}는 받지 않았다.",
-                        "line": line, "emotion": "distant",
-                        "affection_delta": 0, "interest_delta": 0,
-                        "patience_delta": 0, "trust_delta": 0,
-                        "inner": "", "memory": "", "mood": "flat"})
+            self.speak(_flat(narr or f"{self.char.name}는 받지 않았다.", line))
             return
         if not economy.spend(self.con, price, "gift", name):
             self.page()
-            ui.notice(f"LCL이 부족하다. (¤ {price} 필요 / 보유 ¤ {st['lcl']})", ui.EYE)
+            ui.notice(f"{st.currency_name}이 부족하다. "
+                      f"({st.currency_symbol} {price} 필요 / "
+                      f"보유 {st.currency_symbol} {st.money})", "danger")
             return
 
         self.con.execute(
@@ -297,7 +325,8 @@ class Game:
             "SELECT given FROM owned WHERE player=? AND char=? AND item=?",
             (db.PLAYER, self.char.id, key)).fetchone()["given"]
 
-        self.push("sys", f"{name} 을(를) 건넸다.  (¤ -{price})")
+        self.push("sys", f"{name} 을(를) 건넸다.  "
+                         f"({st.currency_symbol} -{price})")
         self.con.commit()
         self.redraw()
 
@@ -310,31 +339,28 @@ class Game:
         msg += f"\n선물을 받은 {nm}로서 반응하라."
 
         clamp = max(1, base) if again == 1 else 1
-        with ui.thinking() if not self.offline else _null():
+        with self._thinking():
             got = self.ask(st, msg, clamp=clamp)
         if again > 1:
             got["affection_delta"] = min(got["affection_delta"], 1)
         recall.remember(self.con, "gift", f"{name}을(를) 받았다.", 2)
         self.speak(got, kind="gift")
 
+    # ── 데이트 ─────────────────────────────────────────────────────────
     def show_dates(self):
         st = self.state()
         self.page()
-        ui.console.print()
-        ui.notice("갈 수 있는 곳")
-        for k, (name, price, need, _) in scenes.date_list(
-                self.char.dates, st["affection"]):
-            afford = ui.GOLD if st["lcl"] >= price else ui.DIM
-            ui.console.print(Text("    " + ui.pad(k, 11), style=ui.MAIN) +
-                             Text(ui.pad(name, 22), style="white") +
-                             Text(f"¤ {price}", style=afford))
-        locked = scenes.locked_dates(self.char.dates, st["affection"])
-        if locked:
-            ui.console.print()
-            ui.dim("잠김: " + ", ".join(
-                f"{v[0]}(호감도 {v[2]})" for _, v in locked[:4]))
-        ui.console.print()
-        ui.dim("/date <이름>  으로 청한다.")
+        rows = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
+                          affordable=st.money >= v[1])
+                for k, v in scenes.date_list(self.char.dates, st.affection)]
+        locked = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
+                            locked=True)
+                  for k, v in scenes.locked_dates(self.char.dates,
+                                                  st.affection)]
+        ui.shop(V.ShopView(title="갈 수 있는 곳", rows=rows, locked=locked,
+                           money=st.money,
+                           currency_symbol=st.currency_symbol,
+                           hint="/date <이름>  으로 청한다."))
 
     def date(self, key):
         st = self.state()
@@ -343,30 +369,30 @@ class Game:
         spot = self.char.dates.get(key)
         if not spot:
             self.page()
-            ui.notice(f"'{key}' 라는 곳은 없다.", ui.EYE)
+            ui.notice(f"'{key}' 라는 곳은 없다.", "danger")
             return
         name, price, need, setting = spot
-        if st["affection"] < need:
+        if st.affection < need:
             self.page()
             ui.notice(f"{self.char.name}는 아직 따라나서지 않을 것이다. "
-                      f"(호감 {need} 필요)", ui.EYE)
+                      f"(호감 {need} 필요)", "danger")
             return
         why = stance.refuses(self.con, need=need, what=name)
         if why:
             self.push("sys", f"{name} — 청했다. "
-                             f"({why} — LCL 은 쓰이지 않았다.)")
+                             f"({why} — {st.currency_name} 은 쓰이지 않았다.)")
             narr, line = stance.refusal_line(self.char, why)
-            self.speak({"narration": narr, "line": line, "emotion": "distant",
-                        "affection_delta": 0, "interest_delta": 0,
-                        "patience_delta": 0, "trust_delta": 0,
-                        "inner": "", "memory": "", "mood": "flat"})
+            self.speak(_flat(narr, line))
             return
         if not economy.spend(self.con, price, "date", name):
             self.page()
-            ui.notice(f"LCL이 부족하다. (¤ {price} 필요 / 보유 ¤ {st['lcl']})", ui.EYE)
+            ui.notice(f"{st.currency_name}이 부족하다. "
+                      f"({st.currency_symbol} {price} 필요 / "
+                      f"보유 {st.currency_symbol} {st.money})", "danger")
             return
 
-        self.push("sys", f"──  {name}  ──  데이트  (¤ -{price})")
+        self.push("sys", f"──  {name}  ──  데이트  "
+                         f"({st.currency_symbol} -{price})")
         self.con.commit()
         self.redraw()
 
@@ -383,7 +409,7 @@ class Game:
         msg = (f"[장소] {name}\n{setting}\n\n"
                f"{nm}와 단둘이 이 장소에 왔다. 도착한 순간의 장면과 {nm}의 "
                "첫 마디를 쓰고, 상대가 고를 행동 3개를 제시하라.")
-        with ui.thinking() if not self.offline else _null():
+        with self._thinking():
             raw = llm.ask(self.con, sysp + scene_rules, msg,
                           offline=self.offline)
         got = llm.normalize(raw, clamp=2) if raw else None
@@ -391,7 +417,7 @@ class Game:
         default_choices = ["옆에 조용히 앉는다", "무슨 생각을 하냐고 묻는다",
                            "말없이 하늘을 본다"]
         if not got:
-            narr, line, emo = persona.fallback(self.char, st["stage_idx"])
+            narr, line, emo = persona.fallback(self.char, st.stage_idx)
             got = {"narration": setting.split(".")[0] + ".", "line": line,
                    "emotion": emo, "affection_delta": 0, "inner": "",
                    "memory": "", "choices": list(default_choices)}
@@ -403,12 +429,9 @@ class Game:
         for i, c in enumerate(got["choices"], 1):
             self.push("opt", f"{i}. {c}")
         self.redraw()
-        try:
-            pick = ui.read_input("  고른다 (번호, 또는 직접 입력) > ",
-                                 rgb=(111, 119, 131)).strip()
-        except (EOFError, KeyboardInterrupt):
-            pick = ""
-            ui.console.print()
+        from . import term
+        pick = term.ask_line("  고른다 (번호, 또는 직접 입력) > ",
+                             rgb=(111, 119, 131))
         if not pick:
             self.page()
             ui.dim("…아무것도 하지 않았다.")
@@ -428,11 +451,11 @@ class Game:
                 f"이 행동에 대한 {nm}의 반응을 쓰라. 데이트의 마무리 장면이다.\n"
                 f"행동이 진심이고 {nm}를 향한 것이면 크게 마음이 움직인다(+4~+8). "
                 f"무난하면 +1~+3. 성의 없거나 {nm}를 도구 취급하면 음수(-5까지).")
-        with ui.thinking() if not self.offline else _null():
+        with self._thinking():
             raw2 = llm.ask(self.con, sysp, msg2, offline=self.offline)
         got2 = llm.normalize(raw2, clamp=8) if raw2 else None
         if not got2:
-            narr, line, emo = persona.fallback(self.char, st["stage_idx"])
+            narr, line, emo = persona.fallback(self.char, st.stage_idx)
             got2 = {"narration": narr, "line": line, "emotion": emo,
                     "affection_delta": 1, "inner": "", "memory": "",
                     "choices": []}
@@ -440,133 +463,83 @@ class Game:
                         f"{name}에 함께 갔다. 상대는 '{action}' 했다.", 2)
         self.speak(got2, kind="date")
 
+    # ── 기록 화면 ──────────────────────────────────────────────────────
     def status(self):
         con, st = self.con, self.state()
         self.page()
-        ui.console.print()
-        ui.notice(f"상대 — {st['player']}")
-        ui.console.print()
-        ui.notice(f"{self.char.name}가 이 사람을 어떻게 여기는가")
-        for label, key in (("호감", "affection"), ("신뢰", "trust"),
-                           ("관심", "interest"), ("인내", "patience")):
-            v = st[key]
-            ui.console.print(
-                Text(f"    {label}  ", style=ui.DIM) +
-                ui.gauge(v, width=24,
-                         color=ui.MAIN if v >= 40 else ui.EYE) +
-                Text(f"  {v:>3}", style="white"))
-        imp = db.get(con, "impression")
-        doubts = db.get(con, "doubts")
-        ui.console.print()
-        if imp:
-            ui.console.print(Text(f"    {self.char.name}의 판단  ", style=ui.DIM) +
-                             Text(f"\u300c{imp}\u300d", style=ui.MAIN))
-        else:
-            ui.dim("    아직 이 사람을 판단하지 않았다.")
-        if doubts:
-            ui.console.print(Text("    걸리는 것    ", style=ui.DIM) +
-                             Text(f"\u300c{doubts}\u300d", style=ui.EYE))
-        broken = stance.check_broken_promises(con)
-        if broken:
-            ui.console.print()
-            ui.notice("지키지 않은 약속", ui.EYE)
-            for t, d in broken[:5]:
-                ui.console.print(Text(f"    {t}  ", style="white") +
-                                 Text(f"({d}일 지났다)", style=ui.EYE))
-        ui.console.print()
-        ui.notice("근무 기록")
-        rows = con.execute(
-            "SELECT day,tools,edits,commits,fails,lcl,stops FROM daily "
-            "WHERE player=? ORDER BY day DESC LIMIT 7", (db.PLAYER,)).fetchall()
-        for r in rows:
-            ui.console.print(
-                Text(f"    {r['day']}  ", style=ui.DIM) +
-                Text(f"도구 {r['tools']:>4}  수정 {r['edits']:>3}  "
-                     f"커밋 {r['commits']:>3}  실패 {r['fails']:>3}  ", style="white") +
-                Text(f"¤ {r['lcl']:>5}", style=ui.GOLD))
-        ui.console.print()
-        ui.notice("호감도 변화 (최근)")
-        led = con.execute(
-            "SELECT ts,kind,delta_aff,reason FROM ledger "
-            "WHERE player=? AND char=? AND delta_aff!=0 "
-            "ORDER BY id DESC LIMIT 8", (db.PLAYER, self.char.id)).fetchall()
-        if not led:
-            ui.dim("아직 없다.")
-        for r in led:
-            style = ui.MAIN if r["delta_aff"] > 0 else ui.EYE
-            sign = "+" if r["delta_aff"] > 0 else ""
-            ui.console.print(
-                Text(f"    {r['ts'][5:16]}  ", style=ui.DIM) +
-                Text(f"{sign}{r['delta_aff']:>3}  ", style=style) +
-                Text(f"{r['kind']} — {r['reason']}", style="white"))
-        ui.console.print()
-        ui.notice("총 획득 ¤ {:,}   ·   보유 ¤ {:,}   ·   만난 횟수 {}".format(
-            db.geti(con, "total_earned"), st["lcl"], db.geti(con, "met_count")))
+        work_days = [
+            V.WorkDay(day=r["day"], tools=r["tools"], edits=r["edits"],
+                      commits=r["commits"], fails=r["fails"], money=r["lcl"])
+            for r in con.execute(
+                "SELECT day,tools,edits,commits,fails,lcl,stops FROM daily "
+                "WHERE player=? ORDER BY day DESC LIMIT 7", (db.PLAYER,))]
+        ledger = [
+            V.LedgerRow(when=r["ts"][5:16], kind=r["kind"],
+                        delta=r["delta_aff"], reason=r["reason"] or "")
+            for r in con.execute(
+                "SELECT ts,kind,delta_aff,reason FROM ledger "
+                "WHERE player=? AND char=? AND delta_aff!=0 "
+                "ORDER BY id DESC LIMIT 8", (db.PLAYER, self.char.id))]
+        ui.status(V.StatusView(
+            player=st.player, char_name=self.char.name,
+            axes=[V.Axis("호감", st.affection, 40),
+                  V.Axis("신뢰", st.trust, 40),
+                  V.Axis("관심", st.interest, 40),
+                  V.Axis("인내", st.patience, 40)],
+            impression=db.get(con, "impression"),
+            doubts=db.get(con, "doubts"),
+            broken_promises=stance.check_broken_promises(con),
+            work_days=work_days, ledger=ledger,
+            total_earned=db.geti(con, "total_earned"),
+            money=st.money, met_count=db.geti(con, "met_count"),
+            currency_symbol=st.currency_symbol))
 
     def memory(self):
         self.page()
-        ui.console.print()
-        ui.notice(f"{self.char.name}가 기억하는 것")
-        rows = self.con.execute(
-            "SELECT ts,kind,text,weight FROM memory "
-            "WHERE player=? AND char=? "
-            "ORDER BY weight DESC, id DESC LIMIT 24",
-            (db.PLAYER, self.char.id)).fetchall()
-        if not rows:
-            ui.dim("아직 아무것도.")
-        for m in rows:
-            ui.console.print(
-                Text(f"    {m['ts'][:10]}  ", style=ui.DIM) +
-                Text("♥" * m["weight"] + "·" * (5 - m["weight"]) + "  ",
-                     style=ui.EYE) +
-                Text(ui.pad(f"[{m['kind']}]", 10), style=ui.DIM) +
-                Text(m["text"], style="white"))
-        pend = recall.pending_count(self.con)
-        if pend:
-            ui.console.print()
-            ui.dim(f"아직 정리되지 않은 대화 {pend}줄")
+        rows = [V.MemoryRow(date=m["ts"][:10], kind=m["kind"],
+                            text=m["text"], weight=m["weight"])
+                for m in self.con.execute(
+                    "SELECT ts,kind,text,weight FROM memory "
+                    "WHERE player=? AND char=? "
+                    "ORDER BY weight DESC, id DESC LIMIT 24",
+                    (db.PLAYER, self.char.id))]
+        ui.memory(V.MemoryView(char_name=self.char.name, rows=rows,
+                               pending=recall.pending_count(self.con)))
 
     def worklog(self):
-        """레이가 보고 있는 근무 기록을 그대로 보여준다."""
+        """캐릭터가 보고 있는 근무 기록을 그대로 보여준다."""
         self.scan()
         self.page()
-        ui.console.print()
-        ui.notice(f"{self.char.name}가 단말로 보고 있는 것 — 오늘")
-        d = work.digest(self.con)
-        if d:
-            for line in d.splitlines():
-                ui.console.print(Text("  " + line, style="white"))
-        else:
-            ui.dim("오늘은 아직 아무 기록도 없다.")
-        past = work.past_days(self.con, 5)
-        if past:
-            ui.console.print()
-            ui.notice("지난 며칠")
-            for day, t in past:
-                ui.console.print(Text(f"    {day}  ", style=ui.DIM) +
-                                 Text(t, style="white"))
+        digest = self.work.digest(self.con)
+        ui.worklog(V.WorklogView(
+            char_name=self.char.name,
+            today=digest.splitlines() if digest else [],
+            past=self.work.past_days(self.con, 5)))
 
     def help(self):
         self.page()
-        ui.console.print()
-        ui.notice("명령")
-        rows = [
-            ("그냥 입력", "말을 건다"),
-            ("/talk <말>", "같음"),
-            ("/date", "갈 수 있는 곳 목록  ·  /date roof 처럼 지정"),
-            ("/gift", "선물 목록  ·  /gift plant 처럼 지정"),
-            ("/status", "근무 기록과 호감도 변화 내역"),
-            ("/memory", "기억하는 것들"),
-            ("/work", "단말로 보고 있는 근무 기록"),
-            ("/clear", "화면 정리"),
-            ("/quit", "나간다"),
-        ]
-        for c, d in rows:
-            ui.console.print(Text("    " + ui.pad(c, 16), style=ui.MAIN) +
-                             Text(d, style=ui.DIM))
-        ui.console.print()
-        ui.dim("LCL은 이 서버에서 Claude Code로 실제 작업을 할 때마다 쌓인다.")
-        ui.dim("파일을 고치고, 커밋하고, 세션을 마무리하면 알게 된다.")
+        w = world.active()
+        ui.help(V.HelpView(
+            rows=[("그냥 입력", "말을 건다"),
+                  ("/talk <말>", "같음"),
+                  ("/date", "갈 수 있는 곳 목록  ·  /date roof 처럼 지정"),
+                  ("/gift", "선물 목록  ·  /gift plant 처럼 지정"),
+                  ("/status", "근무 기록과 호감도 변화 내역"),
+                  ("/memory", "기억하는 것들"),
+                  ("/work", "단말로 보고 있는 근무 기록"),
+                  ("/clear", "화면 정리"),
+                  ("/quit", "나간다")],
+            notes=[f"{w.currency_name}은 훅이 설치된 에이전트로 실제 작업을 "
+                   f"할 때마다 쌓인다.",
+                   "파일을 고치고, 커밋하고, 세션을 마무리하면 알게 된다."]))
+
+
+def _flat(narr, line):
+    """거절처럼 수치가 안 움직이는 발화 하나."""
+    return {"narration": narr, "line": line, "emotion": "distant",
+            "affection_delta": 0, "interest_delta": 0,
+            "patience_delta": 0, "trust_delta": 0,
+            "inner": "", "memory": "", "mood": "flat", "choices": []}
 
 
 class _null:

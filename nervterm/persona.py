@@ -70,9 +70,9 @@ JSON 에 두 필드를 더 넣는다.
 """
 
 
-def context_block(char, *, aff, stage_name, stage_guide, lcl, today_tools,
+def context_block(char, *, aff, stage_name, stage_guide, money, today_tools,
                   today_commits, days_since, streak, memories,
-                  work_today="", work_past=None, last_convo="",
+                  currency="LCL", work_today="", work_past=None, last_convo="",
                   this_convo="", danger_note="", stance_block=""):
     """현재 상태를 시스템 프롬프트 뒤에 붙일 컨텍스트."""
     name = char.name
@@ -86,7 +86,7 @@ def context_block(char, *, aff, stage_name, stage_guide, lcl, today_tools,
         f"- 이 단계에서 {name}의 태도: {stage_guide}",
         f"- 상대는 {last}. 연속 접속 {streak}일차.",
         f"- 오늘 근무 기록: 도구 사용 {today_tools}회, 커밋 {today_commits}회. "
-        f"보유 LCL {lcl}.",
+        f"보유 {currency} {money}.",
     ]
 
     if work_today:
@@ -118,7 +118,15 @@ def context_block(char, *, aff, stage_name, stage_guide, lcl, today_tools,
 
 
 def system_prompt(char, ctx: str) -> str:
-    return f"{char.core}\n{ctx}\n\n{rules(char.name)}"
+    """페르소나 + 세계관 + 지금 상황 + 출력 규칙.
+
+    세계관이 캐릭터와 규칙 사이에 들어간다. 캐릭터가 '누구인가' 다음에
+    '어디서 누구를 상대하는가' 가 오고, 그 다음에 출력 형식이 온다.
+    """
+    from . import world
+    return (f"{char.core}\n"
+            f"{world.active().prompt_block(char.name)}\n"
+            f"{ctx}\n\n{rules(char.name)}")
 
 
 # ── 폴백 대사 ──────────────────────────────────────────────────────────
@@ -130,18 +138,20 @@ def fallback_response(con, st: dict, char) -> dict:
     interest = db.geti(con, "interest")
     patience = db.geti(con, "patience")
 
+    stage_idx = getattr(st, "stage_idx", 0)
+
     pool_key = None
     if patience < config.PATIENCE_MIN_TALK:
         pool_key = "no_patience"
     elif interest < config.INTEREST_FLOOR_TERSE:
         pool_key = "no_interest"
-    elif trust < 20 and st.get("stage_idx", 0) >= 2:
+    elif trust < 20 and stage_idx >= 2:
         pool_key = "no_trust"
 
     if pool_key:
         narr, line, emo = random.choice(char.cold[pool_key])
     else:
-        narr, line, emo = fallback(char, st.get("stage_idx", 0))
+        narr, line, emo = fallback(char, stage_idx)
     return {"narration": narr, "line": line, "emotion": emo,
             "affection_delta": 0, "trust_delta": 0, "interest_delta": 0,
             "patience_delta": 0, "mood": "flat", "impression": "",

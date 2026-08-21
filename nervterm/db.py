@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS daily (
     lcl      INTEGER NOT NULL DEFAULT 0,
     stops    INTEGER NOT NULL DEFAULT 0,
     llm      INTEGER NOT NULL DEFAULT 0,
+    api      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (player, day)
 );
 CREATE TABLE IF NOT EXISTS dialogue (
@@ -243,9 +244,29 @@ def _migrate(con) -> None:
         raise
 
 
+# 나중에 생긴 열. CREATE TABLE IF NOT EXISTS 는 이미 있는 테이블에
+# 열을 붙여 주지 않으므로, 옛 저장소를 위해 따로 확인한다.
+LATER_COLUMNS = [
+    ("daily", "api", "INTEGER NOT NULL DEFAULT 0"),
+    ("work_facts", "agent", "TEXT NOT NULL DEFAULT 'claude'"),
+]
+
+
+def _ensure_columns(con) -> None:
+    for table, column, decl in LATER_COLUMNS:
+        cols = _columns(con, table)
+        if cols and column not in cols:
+            try:
+                con.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            except sqlite3.OperationalError:
+                pass          # 다른 프로세스가 먼저 붙였다
+
+
 def init(con: sqlite3.Connection) -> None:
     _migrate(con)
     con.executescript(SCHEMA)
+    _ensure_columns(con)
     for k, v in GLOBAL_DEFAULTS.items():
         con.execute(
             "INSERT OR IGNORE INTO state(player,char,key,value) VALUES(?,'',?,?)",
@@ -350,3 +371,72 @@ def players(con):
     """이 저장소에 기록이 있는 사용자 목록(진단용)."""
     return [r["player"] for r in con.execute(
         "SELECT DISTINCT player FROM state ORDER BY player")]
+
+
+# ── 초기화 ─────────────────────────────────────────────────────────────
+#
+# 지우는 범위를 셋으로 나눈다. '전부 지움' 하나만 두면 관계만 다시
+# 시작하고 싶은 사람이 근무 기록까지 잃는다.
+#
+# 어느 것이든 **이 플레이어의 것만** 지운다. 홈을 공유하는 경우에도
+# 남의 기록은 건드리지 않는다.
+
+# 캐릭터별로 나뉘는 테이블
+CHAR_TABLES = ("dialogue", "memory", "owned", "flags")
+
+
+def reset_character(con, char_id: str) -> None:
+    """한 사람과의 관계를 처음으로. 재화와 근무 기록은 남는다."""
+    con.execute("DELETE FROM state WHERE player=? AND char=?",
+                (PLAYER, char_id))
+    for table in CHAR_TABLES:
+        con.execute(f"DELETE FROM {table} WHERE player=? AND char=?",
+                    (PLAYER, char_id))
+    con.execute("DELETE FROM ledger WHERE player=? AND char=?",
+                (PLAYER, char_id))
+    _seed_character(con, char_id)
+    con.commit()
+
+
+def reset_relationships(con) -> None:
+    """모든 사람과의 관계를 처음으로. 재화와 근무 기록은 남는다."""
+    for cid in CHARS:
+        reset_character(con, cid)
+
+
+def reset_everything(con) -> None:
+    """전부. 재화·근무 기록·장부까지. 되돌릴 수 없다."""
+    for table in ("state", "ledger", "daily", "dialogue", "memory",
+                  "owned", "flags", "work_scan", "work_facts"):
+        con.execute(f"DELETE FROM {table} WHERE player=?", (PLAYER,))
+    con.commit()
+    init(con)
+
+
+def _seed_character(con, char_id: str) -> None:
+    defaults = dict(CHAR_DEFAULTS)
+    char = characters.get(char_id)
+    if char is not None:
+        for k, v in char.start.items():
+            defaults[k] = str(v)
+    for k, v in defaults.items():
+        con.execute("INSERT OR REPLACE INTO state(player,char,key,value) "
+                    "VALUES(?,?,?,?)", (PLAYER, char_id, k, v))
+
+
+def counts(con) -> dict:
+    """초기화 화면에 '무엇이 얼마나 지워지는가' 를 보여주려고."""
+    def one(sql, args=()):
+        row = con.execute(sql, args).fetchone()
+        return row[0] if row else 0
+
+    return {
+        "memory": one("SELECT COUNT(*) FROM memory WHERE player=?", (PLAYER,)),
+        "dialogue": one("SELECT COUNT(*) FROM dialogue WHERE player=?",
+                        (PLAYER,)),
+        "days": one("SELECT COUNT(*) FROM daily WHERE player=?", (PLAYER,)),
+        "facts": one("SELECT COUNT(*) FROM work_facts WHERE player=?",
+                     (PLAYER,)),
+        "earned": geti(con, "total_earned"),
+        "lcl": geti(con, "lcl"),
+    }
