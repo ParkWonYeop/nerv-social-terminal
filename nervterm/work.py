@@ -10,94 +10,45 @@ LLM을 쓰지 않는다. Claude Code가 이미 저장해 둔 것들을 줍는다
 읽은 바이트 위치를 기억해 증분으로만 읽는다.
 """
 import json
-import os
 import re
-from pathlib import Path
 
-from . import db, identity
-COMMIT_RE = re.compile(r"""git\s+(?:-\S+\s+)*commit\b[^\n]*?-m\s*(['"])(.+?)\1""",
-                       re.S)
+from . import agents, db
+
 MAX_BYTES_PER_SCAN = 4_000_000        # 한 번에 읽을 상한(폭주 방지)
+
 
 def ensure(con):
     """스키마는 db.init 이 만든다. 여기서는 아무것도 하지 않는다."""
     return None
 
 
-def _add(con, day, ts, kind, text, sid=""):
+def _add(con, day, ts, kind, text, sid="", agent="claude"):
     text = (text or "").strip()
     if not text:
         return
     con.execute(
-        "INSERT OR IGNORE INTO work_facts(player,day,ts,kind,text,sid) "
-        "VALUES(?,?,?,?,?,?)", (db.PLAYER, day, ts, kind, text[:300], sid))
-
-
-def _clean(s: str) -> str:
-    s = re.sub(r"\s+", " ", s or "").strip()
-    return s
-
-
-def _harvest(con, rec, sid_fallback=""):
-    """트랜스크립트 레코드 한 줄에서 사실을 뽑는다."""
-    t = rec.get("type")
-    sid = rec.get("sessionId") or rec.get("session_id") or sid_fallback
-    ts = rec.get("timestamp", "") or db.now()
-    day = ts[:10] if len(ts) >= 10 else db.today()
-
-    if t == "ai-title":
-        # timestamp 가 없다. day 를 비워 두고 digest 단계에서 세션 날짜로 귀속시킨다.
-        # 사람이 직접 타이핑한 프롬프트가 있는 세션의 제목만 나중에 채택된다
-        # (게임이 스스로 띄운 claude -p 세션의 제목을 근무 실적으로 오인하지 않기 위해).
-        _add(con, "", db.now(), "title", rec.get("aiTitle", ""), sid)
-        return
-
-    if rec.get("isSidechain"):        # 서브에이전트 잡음 제외
-        return
-
-    if t == "user":
-        if rec.get("promptSource") != "typed":
-            return
-        msg = rec.get("message") or {}
-        content = msg.get("content")
-        if isinstance(content, str) and content.strip():
-            _add(con, day, ts, "prompt", _clean(content)[:160], sid)
-        cwd = rec.get("cwd", "")
-        if cwd:
-            branch = rec.get("gitBranch") or ""
-            label = os.path.basename(cwd) + (f" ({branch})" if branch else "")
-            _add(con, day, ts, "project", label, sid)
-        return
-
-    if t == "assistant":
-        for b in (rec.get("message") or {}).get("content") or []:
-            if not isinstance(b, dict) or b.get("type") != "tool_use":
-                continue
-            name = b.get("name", "")
-            inp = b.get("input") or {}
-            if not isinstance(inp, dict):
-                continue
-            if name in ("Edit", "Write", "NotebookEdit"):
-                fp = inp.get("file_path") or inp.get("notebook_path") or ""
-                if fp:
-                    _add(con, day, ts, "file", os.path.basename(str(fp)), sid)
-            elif name == "Bash":
-                cmd = str(inp.get("command", ""))
-                desc = _clean(str(inp.get("description", "")))
-                if desc:
-                    _add(con, day, ts, "desc", desc[:100], sid)
-                m = COMMIT_RE.search(cmd)
-                if m:
-                    _add(con, day, ts, "commit", _clean(m.group(2))[:120], sid)
+        "INSERT OR IGNORE INTO work_facts(player,day,ts,kind,text,sid,agent) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (db.PLAYER, day, ts, kind, text[:300], sid, agent))
 
 
 def scan(con, *, budget=MAX_BYTES_PER_SCAN) -> int:
-    """새로 쌓인 트랜스크립트만 읽어 사실을 적재. 읽은 바이트 수 반환."""
-    projects = identity.projects_dir()
-    if not projects.is_dir():
-        return 0
+    """켜 둔 에이전트들의 세션 기록을 증분으로 읽는다. 읽은 바이트 수.
+
+    에이전트마다 파일 위치도 레코드 형식도 다르다. 그 차이는 전부
+    agents.py 가 안다 — 여기는 '증분으로 읽고 넣는' 일만 한다.
+    """
     read_total = 0
-    for path in sorted(projects.glob("*/*.jsonl")):
+    for agent in agents.enabled():
+        if read_total >= budget:
+            break
+        read_total += _scan_agent(con, agent, budget - read_total)
+    return read_total
+
+
+def _scan_agent(con, agent, budget) -> int:
+    read_total = 0
+    for path in agent.session_files():
         try:
             stat = path.stat()
         except OSError:
@@ -143,9 +94,11 @@ def scan(con, *, budget=MAX_BYTES_PER_SCAN) -> int:
                     except Exception:
                         continue
                     try:
-                        _harvest(con, rec, sid)
+                        facts = agent.harvest(rec, sid)
                     except Exception:
                         continue
+                    for day, ts, kind, text, fsid in facts:
+                        _add(con, day, ts, kind, text, fsid, agent.id)
                 read_total += consumed
                 new_offset = offset + consumed
         except OSError:

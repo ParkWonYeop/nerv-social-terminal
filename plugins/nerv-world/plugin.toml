@@ -1,0 +1,9 @@
+[plugin]
+id = "nerv"
+kind = "world"
+name = "NERV — 제3신동경시"
+version = "1.0.0"
+api = 1
+entry = "world.py"
+description = "에반게리온의 세계. 재화는 LCL, 플레이어는 제1지부 기술부 오퍼레이터."
+author = "ParkWonYeop"

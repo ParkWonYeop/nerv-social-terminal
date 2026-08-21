@@ -1,0 +1,9 @@
+[plugin]
+id = "nerv"
+kind = "ui"
+name = "NERV 단말"
+version = "1.0.0"
+api = 1
+entry = "ui.py"
+description = "MAGI 부팅 · 엔트리 플러그 다이브 · 붉은 역십자. 기본 화면."
+author = "ParkWonYeop"
