@@ -210,24 +210,33 @@ def normalize(obj, *, clamp=3):
 EMOTIONS = ["neutral", "slight", "warm", "cold",
             "curious", "shaken", "annoyed", "distant"]
 
+_PROPERTIES = {
+    "narration": {"type": "string"},
+    "line": {"type": "string"},
+    "emotion": {"type": "string", "enum": EMOTIONS},
+    "affection_delta": {"type": "integer"},
+    "trust_delta": {"type": "integer"},
+    "interest_delta": {"type": "integer"},
+    "patience_delta": {"type": "integer"},
+    "mood": {"type": "string"},
+    "inner": {"type": "string"},
+    "memory": {"type": "string"},
+    "impression": {"type": "string"},
+    "doubts": {"type": "string"},
+    "choices": {"type": "array", "items": {"type": "string"}},
+}
+
+# OpenAI 계열의 구조화 출력은 `required` 에 **모든** 키가 있어야 하고
+# additionalProperties 가 false 여야 한다. 안 지키면 400 이 온다:
+#   "'required' is required to be … including every key in properties"
+#
+# 전부 required 로 두어도 게임은 멀쩡하다. 안 물어본 턴에는 모델이
+# impression/doubts 를 빈 문자열로 내고, stance 쪽이 빈 값은 무시한다.
+# 스키마를 두 벌로 나누는 것보다 이게 낫다.
 RESPONSE_SCHEMA = {
     "type": "object",
-    "properties": {
-        "narration": {"type": "string"},
-        "line": {"type": "string"},
-        "emotion": {"type": "string", "enum": EMOTIONS},
-        "affection_delta": {"type": "integer"},
-        "trust_delta": {"type": "integer"},
-        "interest_delta": {"type": "integer"},
-        "patience_delta": {"type": "integer"},
-        "mood": {"type": "string"},
-        "inner": {"type": "string"},
-        "memory": {"type": "string"},
-        "impression": {"type": "string"},
-        "doubts": {"type": "string"},
-        "choices": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["line", "emotion"],
+    "properties": _PROPERTIES,
+    "required": list(_PROPERTIES),
     "additionalProperties": False,
 }
 

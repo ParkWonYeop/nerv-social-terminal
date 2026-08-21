@@ -130,6 +130,15 @@ class CodexCLI(Provider):
                    "--sandbox", "read-only",
                    "--skip-git-repo-check",
                    "--ephemeral",
+                   # 사용자의 config.toml 을 물려받지 않는다. 인증은
+                   # CODEX_HOME 에서 그대로 읽으므로 로그인은 유지된다.
+                   #
+                   # 이게 없으면 사용자가 데스크톱 전용 모델을 기본으로
+                   # 잡아 둔 경우 exec 이 400 으로 죽는다. 실제로 여기서
+                   # gpt-5.6-sol 이 "not supported when using Codex with a
+                   # ChatGPT account" 로 거절됐다. 남의 notify·MCP 설정을
+                   # 끌고 들어오지 않는 이점도 있다.
+                   "--ignore-user-config",
                    "--output-schema", schema_path,
                    "-o", out_path,
                    "--color", "never"]
@@ -182,6 +191,7 @@ class CodexLocalCLI(CodexCLI):
                    "--sandbox", "read-only",
                    "--skip-git-repo-check",
                    "--ephemeral",
+                   "--ignore-user-config",
                    "--output-schema", schema_path,
                    "-o", out_path,
                    "--color", "never"]

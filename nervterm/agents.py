@@ -67,8 +67,15 @@ class Agent:
     events = ("PostToolUse", "Stop", "SessionStart", "SessionEnd")
     tool_events = ("PostToolUse",)
 
+    # 이벤트별 훅 타임아웃(초). 기본은 10.
+    hook_timeouts = {}
+    default_hook_timeout = 10
+
     def hook_path(self) -> Path:
         raise NotImplementedError
+
+    def hook_timeout(self, event: str) -> int:
+        return self.hook_timeouts.get(event, self.default_hook_timeout)
 
     def hook_installed(self) -> bool:
         p = self.hook_path()
@@ -226,6 +233,10 @@ class CodexAgent(Agent):
     install_hint = "python3 install-hooks.py --agent codex"
     events = ("PostToolUse", "Stop", "SessionStart", "SessionEnd")
     tool_events = ("PostToolUse",)
+    # Codex 는 종료 훅을 3초로 잘라 버리고, 더 큰 값을 적어 두면
+    # 실행할 때마다 "clamping SessionEnd hook timeout" 경고를 찍는다.
+    # 어차피 잘릴 값이라면 처음부터 3 으로 적어 경고를 없앤다.
+    hook_timeouts = {"SessionEnd": 3}
 
     def hook_path(self) -> Path:
         return self.home() / "hooks.json"

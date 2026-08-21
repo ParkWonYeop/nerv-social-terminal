@@ -70,7 +70,8 @@ def merge(cfg: dict, agent, *, remove=False):
             if not arr:
                 hooks.pop(event, None)
             continue
-        entry = {"hooks": [{"type": "command", "command": CMD, "timeout": 10}]}
+        entry = {"hooks": [{"type": "command", "command": CMD,
+                            "timeout": agent.hook_timeout(event)}]}
         if matcher:
             entry["matcher"] = matcher
         arr.append(entry)
