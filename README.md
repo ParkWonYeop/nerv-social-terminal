@@ -13,7 +13,7 @@
 새 서버라면 클론부터:
 
 ```bash
-sudo git clone https://github.com/<owner>/nerv-social-terminal /opt/nerv-social-terminal
+sudo git clone https://github.com/ParkWonYeop/nerv-social-terminal /opt/nerv-social-terminal
 sudo chown -R $USER /opt/nerv-social-terminal      # 또는 공용 관리 계정
 /opt/nerv-social-terminal/install.sh
 ```
