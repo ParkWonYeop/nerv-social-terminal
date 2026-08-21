@@ -16,6 +16,20 @@ from .ui import view as V
 
 RESTART = "restart"
 
+LOCK_NOTE = "서버 관리자가 잠갔다"
+
+
+def lock(item, key):
+    """관리자가 잠근 설정이면 항목을 잠근다.
+
+    잠긴 걸 안 보여주면 눌러도 아무 일이 없어서 고장으로 보인다.
+    왜 못 바꾸는지 화면에 있어야 한다.
+    """
+    if settings.is_locked(key):
+        item.disabled = True
+        item.disabled_reason = f"{LOCK_NOTE} ({key})"
+    return item
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  최상위
@@ -107,16 +121,17 @@ def _talk_settings(con) -> None:
         env = settings.overridden_by_env("daily_llm_calls")
 
         items = [
-            V.MenuItem("1", "하루 대사 생성 상한",
-                       value=f"{config.daily_llm_calls()}회",
-                       note=("환경변수 " + env + " 가 덮고 있다" if env else
-                             "넘으면 사전 작성 대사로 자동 전환된다")),
-            V.MenuItem("2", "타이핑·부팅 연출",
-                       value="켬" if anim else "끔",
-                       note="SSH 가 느리면 끄는 게 낫다"),
-            V.MenuItem("3", "타이핑 속도",
-                       value=f"{speed:.3f}초/글자" if speed else "즉시",
-                       note="0 이면 한 번에 출력"),
+            lock(V.MenuItem("1", "하루 대사 생성 상한",
+                            value=f"{config.daily_llm_calls()}회",
+                            note=("환경변수 " + env + " 가 덮고 있다" if env
+                                  else "넘으면 사전 작성 대사로 자동 전환된다")),
+                 "daily_llm_calls"),
+            lock(V.MenuItem("2", "타이핑·부팅 연출",
+                            value="켬" if anim else "끔",
+                            note="SSH 가 느리면 끄는 게 낫다"), "animation"),
+            lock(V.MenuItem("3", "타이핑 속도",
+                            value=f"{speed:.3f}초/글자" if speed else "즉시",
+                            note="0 이면 한 번에 출력"), "typing_speed"),
         ]
         got = ui.menu(V.MenuView(title="설정 — 대화", items=items))
         if got in (None, "b"):
@@ -147,8 +162,8 @@ def _llm_settings(con) -> None:
         prov = llm.current()
         ok, why = llm.probe(prov)
 
-        items = [V.MenuItem("1", "프로바이더", value=prov.label,
-                            note=prov.billing_label())]
+        items = [lock(V.MenuItem("1", "프로바이더", value=prov.label,
+                                 note=prov.billing_label()), "llm.provider")]
         if prov.wants_model:
             items.append(V.MenuItem(
                 "2", "모델", value=prov.model or "(기본값)"))
@@ -159,14 +174,14 @@ def _llm_settings(con) -> None:
             items.append(V.MenuItem(
                 "4", "키를 읽을 환경변수", value=prov.key_env or "(없음)",
                 note="키 자체는 저장하지 않는다"))
-        items.append(V.MenuItem(
+        items.append(lock(V.MenuItem(
             "5", "과금 안전장치",
             value="켬 (유료 API 차단)" if guard.guard_on() else "끔",
             tone="plain" if guard.guard_on() else "danger",
             note=("끄기 전에는 토큰당 과금되는 프로바이더를 고를 수 없다"
                   if guard.guard_on() else
                   f"유료 프로바이더를 고를 수 있다. 하루 상한 "
-                  f"{guard.daily_cap()}회")))
+                  f"{guard.daily_cap()}회")), "llm.billing_guard"))
         if not guard.guard_on():
             items.append(V.MenuItem(
                 "6", "유료 호출 하루 상한",

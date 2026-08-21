@@ -11,6 +11,7 @@
 뷰 모델이 만들어지는가, 안전장치가 실제로 막는가, 초기화가 남의
 데이터를 지우지 않는가.
 """
+import json
 import os
 import sys
 import tempfile
@@ -140,6 +141,106 @@ def _():
     finally:
         del os.environ["NERV_DAILY_LLM_CALLS"]
         settings.put("daily_llm_calls", 200)
+
+
+@check("설정 — 사용자별로 분리된다 (저장소를 공유해도)")
+def _():
+    from nervterm import identity, settings
+    import importlib
+
+    def as_user(name, fn):
+        os.environ["REI_PLAYER"] = name
+        settings._cache = None
+        importlib.reload(identity)
+        importlib.reload(settings)
+        try:
+            return fn()
+        finally:
+            os.environ["REI_PLAYER"] = "smoketest"
+            settings._cache = None
+            importlib.reload(identity)
+            importlib.reload(settings)
+
+    as_user("alice", lambda: settings.put("daily_llm_calls", 50))
+    got = as_user("bob", lambda: settings.get("daily_llm_calls"))
+    eq(got, 200, "bob 이 alice 의 설정을 봤다")
+    back = as_user("alice", lambda: settings.get("daily_llm_calls"))
+    eq(back, 50, "alice 의 설정이 사라졌다")
+    true(as_user("alice", lambda: settings.path().name) !=
+         as_user("bob", lambda: settings.path().name), "파일이 같다")
+
+
+@check("설정 — 서버 공통값이 기본이 되고, 잠근 것은 못 바꾼다")
+def _():
+    import importlib
+    from nervterm import settings
+    site = Path(_TMP) / "site.json"
+    site.write_text(json.dumps({
+        "daily_llm_calls": 80,
+        "llm": {"billing_guard": True, "api_daily_call_cap": 10},
+        "locked": ["daily_llm_calls", "llm.billing_guard"],
+    }), encoding="utf-8")
+    os.environ["NERV_SITE_SETTINGS"] = str(site)
+    settings._cache = None
+    try:
+        eq(settings.get("daily_llm_calls"), 80, "공통 기본값")
+        eq(settings.get("llm.api_daily_call_cap"), 10, "공통값(안 잠김)")
+        true(settings.is_locked("daily_llm_calls"), "잠금 판별")
+        true(settings.is_locked("llm.billing_guard"), "점 표기 잠금")
+        true(not settings.is_locked("typing_speed"), "안 잠긴 키")
+
+        eq(settings.put("daily_llm_calls", 5000), False, "잠긴 키가 바뀌었다")
+        eq(settings.get("daily_llm_calls"), 80, "잠긴 값이 밀렸다")
+
+        eq(settings.put("typing_speed", 0.05), True, "안 잠긴 키를 못 바꿨다")
+        eq(settings.get("typing_speed"), 0.05, "변경이 반영 안 됐다")
+
+        # 안 잠긴 공통값은 사용자가 덮을 수 있어야 한다
+        settings.put("llm.api_daily_call_cap", 3)
+        eq(settings.get("llm.api_daily_call_cap"), 3, "공통값을 못 덮었다")
+    finally:
+        del os.environ["NERV_SITE_SETTINGS"]
+        settings._cache = None
+
+
+@check("설정 — 파일을 손으로 고쳐도 잠금을 못 넘는다")
+def _():
+    from nervterm import settings
+    site = Path(_TMP) / "site2.json"
+    site.write_text(json.dumps({
+        "daily_llm_calls": 80, "locked": ["daily_llm_calls"]}),
+        encoding="utf-8")
+    p = settings.path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"version": 2, "daily_llm_calls": 9999}),
+                 encoding="utf-8")
+    os.environ["NERV_SITE_SETTINGS"] = str(site)
+    settings._cache = None
+    try:
+        eq(settings.get("daily_llm_calls"), 80, "손으로 고쳐 잠금을 넘었다")
+    finally:
+        del os.environ["NERV_SITE_SETTINGS"]
+        p.write_text(json.dumps({"version": 2}), encoding="utf-8")
+        settings._cache = None
+
+
+@check("설정 — 사용자 파일에 공통값이 박제되지 않는다")
+def _():
+    from nervterm import settings
+    site = Path(_TMP) / "site3.json"
+    site.write_text(json.dumps({"typing_speed": 0.01}), encoding="utf-8")
+    os.environ["NERV_SITE_SETTINGS"] = str(site)
+    settings._cache = None
+    try:
+        settings.put("animation", False)          # 다른 키를 만진다
+        stored = json.loads(settings.path().read_text(encoding="utf-8"))
+        true("typing_speed" not in stored,
+             "공통값이 사용자 파일에 박혔다 — 관리자가 바꿔도 반영 안 된다")
+        eq(settings.get("typing_speed"), 0.01, "공통값이 적용돼야 한다")
+    finally:
+        del os.environ["NERV_SITE_SETTINGS"]
+        settings.put("animation", True)
+        settings._cache = None
 
 
 @check("설정 — 깨진 파일이 게임을 막지 않는다")
