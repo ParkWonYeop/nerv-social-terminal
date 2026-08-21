@@ -192,15 +192,29 @@ _CSI_TILDE = {"1": KEY_HOME, "4": KEY_END, "5": KEY_PGUP, "6": KEY_PGDN,
               "7": KEY_HOME, "8": KEY_END}
 
 
+def _waiting(fd, timeout) -> bool:
+    import select
+    try:
+        return bool(select.select([fd], [], [], timeout)[0])
+    except (OSError, ValueError):
+        return False
+
+
 def read_key(timeout=None):
     """키 하나. 방향키·엔터·ESC 는 이름으로, 나머지는 글자 그대로.
 
     TTY 가 아니면 None — 호출부가 줄 입력으로 떨어진다.
     Ctrl+C 는 KeyboardInterrupt 로 올린다(raw 모드에서는 신호가 안 온다).
+
+    **os.read 로 파일 디스크립터에서 직접 읽는다.** sys.stdin.read(1) 을
+    쓰면 안 된다 — 파이썬의 버퍼가 방향키 3바이트(\\x1b[A)를 통째로
+    당겨 놓고 \\x1b 만 돌려주는데, 그 다음 select 는 fd 만 보므로
+    "읽을 것 없음" 이라 답한다. 그래서 방향키가 ESC 단독으로 판정돼
+    선택이 취소되고 게임이 튕겼다.
     """
     if not is_tty():
         return None
-    import select
+    import os
     import termios
     import tty
 
@@ -209,41 +223,60 @@ def read_key(timeout=None):
         old = termios.tcgetattr(fd)
     except termios.error:
         return None
+
+    def grab(n=1):
+        try:
+            return os.read(fd, n)
+        except OSError:
+            return b""
+
     try:
-        tty.setraw(fd)
-        if timeout is not None:
-            if not select.select([sys.stdin], [], [], timeout)[0]:
-                return None
-        ch = sys.stdin.read(1)
-        if ch == "\x03":
+        # TCSANOW 로 즉시 전환한다. tty.setraw() 의 기본값은 TCSAFLUSH 라
+        # 이미 들어와 있는 입력을 **버린다** — 빠르게 연타하거나 화면이
+        # 그려지기 전에 누른 키가 통째로 사라진다.
+        tty.setraw(fd, termios.TCSANOW)
+        if timeout is not None and not _waiting(fd, timeout):
+            return None
+        ch = grab()
+        if not ch:
+            return KEY_ESC
+        b = ch[0]
+
+        if b == 3:
             raise KeyboardInterrupt
-        if ch in ("\r", "\n"):
+        if b in (13, 10):
             return KEY_ENTER
-        if ch == "\t":
+        if b == 9:
             return KEY_TAB
-        if ch in ("\x7f", "\b"):
+        if b in (127, 8):
             return KEY_BACKSPACE
-        if ch == "\x04":
+        if b == 4:
             return KEY_ESC              # Ctrl+D 도 취소로 본다
-        if ch != "\x1b":
-            return ch
+
+        if b != 27:
+            # 한글 등 멀티바이트는 이어지는 바이트까지 모아야 글자가 된다
+            need = 3 if b >= 0xF0 else 2 if b >= 0xE0 else 1 if b >= 0xC0 else 0
+            for _ in range(need):
+                if not _waiting(fd, 0.05):
+                    break
+                ch += grab()
+            return ch.decode("utf-8", "replace")
 
         # ESC — 뒤에 아무것도 없으면 ESC 단독, 있으면 이스케이프 시퀀스.
-        # 짧게 기다려 본다. 이걸 안 하면 ESC 키가 먹히지 않는다.
-        if not select.select([sys.stdin], [], [], 0.05)[0]:
+        if not _waiting(fd, 0.06):
             return KEY_ESC
-        second = sys.stdin.read(1)
+        second = grab().decode("latin-1")
         if second not in ("[", "O"):
             return KEY_ESC
-        third = sys.stdin.read(1)
+        third = grab().decode("latin-1")
         if third in _CSI:
             return _CSI[third]
         if third.isdigit():
             # \x1b[5~ 같은 것. ~ 까지 읽어 버린다.
             digits = third
-            while select.select([sys.stdin], [], [], 0.05)[0]:
-                nxt = sys.stdin.read(1)
-                if nxt == "~" or not nxt.isdigit():
+            while _waiting(fd, 0.05):
+                nxt = grab().decode("latin-1")
+                if not nxt or nxt == "~" or not nxt.isdigit():
                     break
                 digits += nxt
             return _CSI_TILDE.get(digits[0], KEY_ESC)
