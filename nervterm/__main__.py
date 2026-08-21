@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """진입점.
 
-  python3 -m reigame            게임 시작
-  python3 -m reigame hook       훅 모드 (Claude Code가 stdin으로 호출)
+  python3 -m nervterm            게임 시작
+  python3 -m nervterm hook       훅 모드 (Claude Code가 stdin으로 호출)
 """
 import argparse
 import sys

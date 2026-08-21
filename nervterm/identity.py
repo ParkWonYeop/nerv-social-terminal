@@ -34,13 +34,24 @@ def player() -> str:
 
 
 def data_dir() -> Path:
-    """이 사용자의 저장소 위치."""
-    override = os.environ.get("REI_DATA")
+    """이 사용자의 저장소 위치.
+
+    프로젝트가 rei 에서 nerv-social-terminal 로 개명되면서 저장소 폴더도
+    바뀌었다. 옛 폴더가 있고 새 폴더가 없으면 자동으로 옮긴다 —
+    기존 플레이 데이터(레이·아스카·미사토)가 그대로 유지된다.
+    """
+    override = os.environ.get("NERV_DATA") or os.environ.get("REI_DATA")
     if override:
         return Path(override).expanduser()
     base = os.environ.get("XDG_DATA_HOME")
     root = Path(base).expanduser() if base else Path.home() / ".local" / "share"
-    return root / "rei"
+    new, legacy = root / "nerv-social-terminal", root / "rei"
+    if not new.exists() and legacy.is_dir():
+        try:
+            legacy.rename(new)          # 같은 파일시스템 — 원자적
+        except OSError:
+            return legacy               # 못 옮기면 옛 자리를 계속 쓴다
+    return new
 
 
 def projects_dir() -> Path:

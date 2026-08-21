@@ -1,19 +1,21 @@
-# EVA 단말 — 아야나미 레이 · 소류 아스카 랑그레이 · 카츠라기 미사토
+# NERV Social Terminal
 
-시작 화면에서 만나러 갈 상대를 고른다. 호감도·신뢰·기억·선물은 캐릭터별로 완전히 분리되고, 재화(LCL)와 근무 기록은 공유된다. 커밋·위험 명령 같은 단말 기록은 둘 다 보고 있다.
+**아야나미 레이 · 소류 아스카 랑그레이 · 카츠라기 미사토** — 터미널에서 도는 프롬프트형 미연시.
 
-터미널에서 도는 프롬프트형 미연시. **이 서버에서 실제로 한 Claude Code 작업이 그대로 게임 재화가 된다.**
+시작 화면에서 만나러 갈 상대를 고른다. 호감도·신뢰·기억·선물은 캐릭터별로 완전히 분리되고, 재화(LCL)와 근무 기록은 공유된다. 커밋·위험 명령 같은 단말 기록은 세 사람 모두 보고 있다.
 
-플레이어는 NERV 제1지부 기술부 오퍼레이터다. 파일을 고치고 커밋하는 근무 실적이 LCL로 쌓이고, 그걸로 레이를 만나러 간다.
+**이 서버에서 실제로 한 Claude Code 작업이 그대로 게임 재화가 된다.**
+
+플레이어는 NERV 제1지부 기술부 오퍼레이터다. 파일을 고치고 커밋하는 근무 실적이 LCL로 쌓이고, 그걸로 그녀들을 만나러 간다.
 
 ## 설치
 
 새 서버라면 클론부터:
 
 ```bash
-sudo git clone https://github.com/<owner>/eva-terminal /opt/rei
-sudo chown -R $USER /opt/rei      # 또는 공용 관리 계정
-/opt/rei/install.sh
+sudo git clone https://github.com/<owner>/nerv-social-terminal /opt/nerv-social-terminal
+sudo chown -R $USER /opt/nerv-social-terminal      # 또는 공용 관리 계정
+/opt/nerv-social-terminal/install.sh
 ```
 
 `install.sh` 는 `~/.local/bin/eva` 심볼릭 링크를 걸고 내 계정에 훅을 설치한다.
@@ -30,15 +32,15 @@ sudo chown -R $USER /opt/rei      # 또는 공용 관리 계정
 ### 서버 전체에 설치 (모든 사용자 자동 적용)
 
 ```bash
-sudo ln -sfn /opt/rei/eva /usr/local/bin/eva              # 전역 명령
-sudo python3 /opt/rei/install-hooks.py --global           # 전역 훅
+sudo ln -sfn /opt/nerv-social-terminal/eva /usr/local/bin/eva      # 전역 명령
+sudo python3 /opt/nerv-social-terminal/install-hooks.py --global   # 전역 훅
 ```
 
 전역 훅은 `/etc/claude-code/managed-settings.json` 에 들어가 모든 사용자의
 Claude Code 에 자동 적용된다 — 각자 아무것도 할 필요가 없다.
 전역 훅을 쓰면 개인 훅은 `python3 install-hooks.py --uninstall` 로 지워
 중복 적립을 막는다. 플레이 데이터는 어차피 각자의 홈
-(`~/.local/share/rei/`)에 생기므로 서버 간·사용자 간에 섞이지 않는다.
+(`~/.local/share/nerv-social-terminal/`)에 생기므로 서버 간·사용자 간에 섞이지 않는다.
 
 ## 실행
 
@@ -60,15 +62,15 @@ eva
 
 | 층 | 하는 일 |
 |---|---|
-| **훅** (`reigame/hook.py`) | Claude Code의 PostToolUse / Stop / SessionStart / SessionEnd 를 받아 LCL·호감도를 적립. 항상 exit 0, stdout 안 건드림 |
+| **훅** (`nervterm/hook.py`) | Claude Code의 PostToolUse / Stop / SessionStart / SessionEnd 를 받아 LCL·호감도를 적립. 항상 exit 0, stdout 안 건드림 |
 | **규칙 엔진** (`economy.py`) | 즉시 판정 — 도구 보상, 커밋 보너스, 연속 실패, 방치, 위험 명령 |
-| **레이** (`llm.py` + `persona.py`) | 대화·선물·데이트의 반응과 호감도를 `claude -p` 헤드리스로 판정 |
+| **캐릭터** (`characters.py` + `llm.py` + `persona.py`) | 캐릭터 정의(성격·선물·데이트)와 대화 반응·호감도 판정 (`claude -p` 헤드리스) |
 | **근무 일지** (`work.py`) | 트랜스크립트를 증분으로 읽어 "무슨 작업을 했는지" 추출. LLM 안 씀 |
 | **기억** (`recall.py`) | 관련성 기반 회상, 중복 병합, 오래된 대화 압축 |
 | **화면** (`ui.py`) | rich 기반 TUI |
-| **관계** (`stance.py`) | 레이가 이 상대를 어떻게 여기는지. 네 축 + 인상 + 걸리는 것 |
+| **관계** (`stance.py`) | 캐릭터가 이 상대를 어떻게 여기는지. 네 축 + 인상 + 걸리는 것 |
 | **신원** (`identity.py`) | 터미널 로그인 사용자로 상대를 구분 |
-| **저장** (`db.py`) | `~/.local/share/rei/rei.db` (SQLite, WAL) |
+| **저장** (`db.py`) | `~/.local/share/nerv-social-terminal/rei.db` (SQLite, WAL). 사용자별·캐릭터별 분리, 첫 실행 때 자동 생성·마이그레이션 |
 
 ## 상대는 누구인가 — 사용자별 분리
 
@@ -83,9 +85,9 @@ eva
   asuka         5   10       0      0     ← 처음 온 사람
 ```
 
-저장소도 각자의 홈(`~/.local/share/rei/`)에 있어 DB 파일 자체가 분리된다. 모든 행에 `player` 도 함께 박아서 홈을 공유하는 경우에도 섞이지 않는다. 근무 요약은 각자의 `~/.claude/projects` 만 읽는다.
+저장소도 각자의 홈(`~/.local/share/nerv-social-terminal/`)에 있어 DB 파일 자체가 분리된다. 모든 행에 `player` 도 함께 박아서 홈을 공유하는 경우에도 섞이지 않는다. 근무 요약은 각자의 `~/.claude/projects` 만 읽는다.
 
-`REI_PLAYER=이름` 으로 덮어쓸 수 있다 (테스트용). `REI_DATA=경로` 로 저장소 위치를 바꿀 수 있다.
+`REI_PLAYER=이름` 으로 덮어쓸 수 있다 (테스트용). `NERV_DATA=경로`(또는 `REI_DATA`) 로 저장소 위치를 바꿀 수 있다. 옛 `~/.local/share/rei/` 저장소는 첫 실행 때 자동으로 새 위치로 옮겨진다.
 
 ## LCL 벌기 — 그냥 평소대로 일하면 된다
 
@@ -271,7 +273,7 @@ extra usage 설정을 확인하는 게 확실하다.
 - 대화 압축은 30줄 넘게 쌓였을 때 접속당 **최대 1회**
 - `./eva --offline` — LLM 0회. 규칙과 사전 대사만으로 플레이
 
-한도는 `REI_DAILY_LLM_CALLS` 환경변수(또는 `reigame/config.py` 의 `DAILY_LLM_CALLS`)로 조정한다.
+한도는 `REI_DAILY_LLM_CALLS` 환경변수(또는 `nervterm/config.py` 의 `DAILY_LLM_CALLS`)로 조정한다.
 
 ## 옵션
 
@@ -312,8 +314,8 @@ REI_HOOK_DEBUG=1                       data/hook.log 에 훅 동작 기록
 
 ## 조정
 
-`reigame/config.py` 에 보상·페널티·단계 기준이 모두 모여 있다.
-선물과 데이트 장소는 `reigame/scenes.py`, 레이의 성격과 폴백 대사는 `reigame/persona.py`.
-기억 회상 점수와 중복 임계값은 `reigame/recall.py`, 트랜스크립트 추출 규칙은 `reigame/work.py`.
+`nervterm/config.py` 에 보상·페널티·단계 기준이 모두 모여 있다.
+선물과 데이트 장소는 `nervterm/scenes.py`, 캐릭터 정의(성격·대사·선물·데이트)는 `nervterm/characters.py`, 프롬프트 조립은 `nervterm/persona.py`.
+기억 회상 점수와 중복 임계값은 `nervterm/recall.py`, 트랜스크립트 추출 규칙은 `nervterm/work.py`.
 
 `REI_DEBUG=1` 을 붙이면 기억 압축 중 발생한 예외를 그대로 보여준다.

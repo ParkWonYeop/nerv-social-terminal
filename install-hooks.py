@@ -44,7 +44,7 @@ def is_ours(entry) -> bool:
         cmd = str(h.get("command", ""))
         if re.search(r"(?:^|[/\s])(?:eva|rei)(?:\.py)?\s+hook(?:\s|$)", cmd):
             return True
-        if re.search(r"reigame\s+hook(?:\s|$)", cmd):
+        if re.search(r"(?:reigame|nervterm)\\s+hook(?:\s|$)", cmd):
             return True
     return False
 

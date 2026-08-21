@@ -17,7 +17,7 @@ case "${1:-}" in
       echo
       echo "저장 데이터는 남겨 뒀다: $(python3 -c "
 import sys; sys.path.insert(0,'${ROOT}')
-from reigame import config; print(config.db_path())")"
+from nervterm import config; print(config.db_path())")"
       exit 0 ;;
 esac
 
