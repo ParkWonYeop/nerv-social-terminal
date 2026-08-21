@@ -149,6 +149,25 @@ def _():
         world.load(refresh=True)
 
 
+@check("세계관 — 바꾸면 화면도 따라 바뀐다")
+def _():
+    from nervterm import characters, settings, ui, world
+    characters.load(refresh=True)
+    settings.put("plugins.world", "nerv")
+    w = world.load(refresh=True)
+    u = ui.load(w, refresh=True)
+    eq(u.world.id, "nerv", "시작 세계")
+    try:
+        world.use("rezero")
+        # UI 가 시작할 때 받은 세계관 객체를 계속 들고 있으면, 상태창의
+        # 재화는 바뀌었는데 타이틀 카드만 옛 이름으로 남는다.
+        eq(ui.active().world.id, "rezero", "화면이 옛 세계를 붙들고 있다")
+        eq(ui.active().world.currency_name, "동화", "재화 이름")
+    finally:
+        world.use("nerv")
+        eq(ui.active().world.id, "nerv", "되돌리기")
+
+
 @check("세계관 — 캐릭터와 안 맞으면 알려 준다")
 def _():
     from nervterm import characters, settings, world

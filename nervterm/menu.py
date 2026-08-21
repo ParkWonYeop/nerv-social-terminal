@@ -431,10 +431,28 @@ def _world_settings(con) -> None:
     if got in (None, "b", "quit"):
         return
     chosen = next((it.payload for it in items if it.key == got), None)
-    if chosen and chosen != current:
-        world.use(chosen)
-        ui.notice(f"세계관을 {chosen} 로 바꿨다.", "good")
-        ui.pause()
+    if not chosen or chosen == current:
+        return
+    world.use(chosen)
+    ui.notice(f"세계관을 {chosen} 로 바꿨다.", "good")
+
+    # 이미 나눈 대화가 있으면 알려 준다.
+    #
+    # 세계관은 프롬프트에 '지금 어떤 세상인가' 를 넣어 줄 뿐이고, 지난
+    # 대화도 함께 들어간다. 그리고 캐릭터는 자기가 전에 한 말과
+    # 어긋나지 않으려 한다 — 그게 이 게임의 설계다. 그래서 옛 세계에서
+    # "여긴 제3신동경시야" 라고 말한 적이 있으면, 세계관을 바꿔도
+    # 한동안 그렇게 답한다. 고장이 아니라 기억이 이기는 것이다.
+    said = con.execute(
+        "SELECT COUNT(*) FROM dialogue WHERE player=? AND role='rei'",
+        (db.PLAYER,)).fetchone()[0]
+    if said:
+        ui.blank()
+        ui.line(f"이미 나눈 대화가 {said}줄 있다.", "warn")
+        ui.dim("캐릭터는 전에 자기가 한 말과 어긋나지 않으려 한다.")
+        ui.dim("옛 세계 이야기를 한동안 계속할 수 있다 — 고장이 아니다.")
+        ui.dim("완전히 새로 시작하려면  설정 → 초기화 → 모든 관계.")
+    ui.pause()
 
 
 # ═══════════════════════════════════════════════════════════════════════

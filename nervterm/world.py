@@ -83,11 +83,22 @@ def currency_symbol() -> str:
 
 
 def use(world_id: str):
-    """세계관을 바꾼다(설정 화면용). 저장은 호출부가 한다."""
+    """세계관을 바꾼다(설정 화면용).
+
+    화면에도 새 세계를 알려 줘야 한다. UI 는 시작할 때 받은 세계관
+    객체를 들고 있어서, 여기서 갈아 끼우지 않으면 상태창의 재화는
+    바뀌었는데 타이틀 카드만 옛 세계 이름으로 남는다.
+    """
     global _active
     _active = None
     settings.put("plugins.world", world_id)
-    return load(refresh=True)
+    got = load(refresh=True)
+    try:
+        from . import ui
+        ui.set_world(got)
+    except Exception:                                         # noqa: BLE001
+        pass          # 화면이 아직 안 올라왔을 수도 있다
+    return got
 
 
 def available():
