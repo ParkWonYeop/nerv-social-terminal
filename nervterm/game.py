@@ -266,9 +266,7 @@ class Game:
         self.speak(got)
 
     # ── 선물 ───────────────────────────────────────────────────────────
-    def show_gifts(self):
-        st = self.state()
-        self.page()
+    def gift_view(self, st) -> V.ShopView:
         rows = []
         for k, (name, price, need, _, _) in scenes.gift_list(
                 self.char.gifts, st.affection):
@@ -283,15 +281,25 @@ class Game:
                             locked=True)
                   for k, v in scenes.locked_gifts(self.char.gifts,
                                                   st.affection)]
-        ui.shop(V.ShopView(title="상점 — 선물", rows=rows, locked=locked,
-                           money=st.money,
-                           currency_symbol=st.currency_symbol,
-                           hint="/gift <이름>  으로 건넨다."))
+        return V.ShopView(title="상점 — 선물", rows=rows, locked=locked,
+                          money=st.money,
+                          currency_symbol=st.currency_symbol,
+                          hint="↑↓ 고르고 Enter.  Esc 취소")
+
+    def show_gifts(self):
+        self.page()
+        ui.shop(self.gift_view(self.state()))
 
     def gift(self, key):
         st = self.state()
         if not key:
-            return self.show_gifts()
+            # 목록만 보여주고 끝내지 않는다 — 골라서 그대로 건넨다.
+            self.page()
+            picked = ui.choose_shop(self.gift_view(st))
+            if picked is None:
+                self.redraw()
+                return
+            key = picked.key
         item = self.char.gifts.get(key)
         if not item:
             self.page()
@@ -347,9 +355,7 @@ class Game:
         self.speak(got, kind="gift")
 
     # ── 데이트 ─────────────────────────────────────────────────────────
-    def show_dates(self):
-        st = self.state()
-        self.page()
+    def date_view(self, st) -> V.ShopView:
         rows = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
                           affordable=st.money >= v[1])
                 for k, v in scenes.date_list(self.char.dates, st.affection)]
@@ -357,15 +363,24 @@ class Game:
                             locked=True)
                   for k, v in scenes.locked_dates(self.char.dates,
                                                   st.affection)]
-        ui.shop(V.ShopView(title="갈 수 있는 곳", rows=rows, locked=locked,
-                           money=st.money,
-                           currency_symbol=st.currency_symbol,
-                           hint="/date <이름>  으로 청한다."))
+        return V.ShopView(title="갈 수 있는 곳", rows=rows, locked=locked,
+                          money=st.money,
+                          currency_symbol=st.currency_symbol,
+                          hint="↑↓ 고르고 Enter.  Esc 취소")
+
+    def show_dates(self):
+        self.page()
+        ui.shop(self.date_view(self.state()))
 
     def date(self, key):
         st = self.state()
         if not key:
-            return self.show_dates()
+            self.page()
+            picked = ui.choose_shop(self.date_view(st))
+            if picked is None:
+                self.redraw()
+                return
+            key = picked.key
         spot = self.char.dates.get(key)
         if not spot:
             self.page()
@@ -426,20 +441,11 @@ class Game:
             got["choices"] = list(default_choices)
         self.speak(got, kind="date")
 
-        for i, c in enumerate(got["choices"], 1):
-            self.push("opt", f"{i}. {c}")
-        self.redraw()
-        from . import term
-        pick = term.ask_line("  고른다 (번호, 또는 직접 입력) > ",
-                             rgb=(111, 119, 131))
-        if not pick:
+        action = self.pick_action(got["choices"])
+        if not action:
             self.page()
             ui.dim("…아무것도 하지 않았다.")
             return
-        if pick.isdigit() and 1 <= int(pick) <= len(got["choices"]):
-            action = got["choices"][int(pick) - 1]
-        else:
-            action = pick
         self.push("user", action)
         db.say(self.con, "user", action, "", self.sess)
         self.redraw()
@@ -462,6 +468,29 @@ class Game:
         recall.remember(self.con, "date",
                         f"{name}에 함께 갔다. 상대는 '{action}' 했다.", 2)
         self.speak(got2, kind="date")
+
+    def pick_action(self, choices) -> str:
+        """데이트 중의 행동 선택.
+
+        마지막에 '직접 입력' 을 둔다. 거기까지 내려가서 Enter 를 누르면
+        자유 입력으로 넘어가고, 쓴 말이 그대로 행동이 된다. 제시된
+        선택지 밖으로 나갈 길이 없으면 대화가 아니라 설문이 된다.
+
+        화면을 지우지 않는다(clear=False) — 방금 나온 장면과 첫 마디가
+        위에 남아 있어야 무엇을 고르는지 알 수 있다.
+        """
+        items = [V.MenuItem(key=str(i), label=c, payload=c)
+                 for i, c in enumerate(choices, 1)]
+        items.append(V.MenuItem(
+            key="_typed", label="직접 입력…", tone="warn", input_mode=True,
+            note="하고 싶은 말이나 행동을 직접 쓴다"))
+
+        got = ui.choose(V.MenuView(
+            title="", items=items, clear=False, max_rows=8,
+            hint="↑↓ 고르고 Enter.  Esc 그만두기"))
+        if got is None:
+            return ""
+        return got.typed if got.input_mode else (got.payload or "")
 
     # ── 기록 화면 ──────────────────────────────────────────────────────
     def status(self):
@@ -522,8 +551,9 @@ class Game:
         ui.help(V.HelpView(
             rows=[("그냥 입력", "말을 건다"),
                   ("/talk <말>", "같음"),
-                  ("/date", "갈 수 있는 곳 목록  ·  /date roof 처럼 지정"),
-                  ("/gift", "선물 목록  ·  /gift plant 처럼 지정"),
+                  ("↑↓ Enter", "목록에서 고른다  ·  Esc 취소"),
+                  ("/date", "갈 곳을 고른다  ·  /date roof 로 바로 지정도 된다"),
+                  ("/gift", "선물을 고른다  ·  /gift plant 로 바로 지정도 된다"),
                   ("/status", "근무 기록과 호감도 변화 내역"),
                   ("/memory", "기억하는 것들"),
                   ("/work", "단말로 보고 있는 근무 기록"),

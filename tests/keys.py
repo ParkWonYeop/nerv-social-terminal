@@ -228,6 +228,82 @@ def t_chooser_typed_input():
     eq(chose(feed, TYPED, "TYPED:"), "옆에 앉는다", "직접 입력")
 
 
+SHOP = """
+import sys
+sys.path.insert(0, {root!r})
+from nervterm.ui.base import BaseUI
+from nervterm.ui import view as V
+ui = BaseUI()
+sv = V.ShopView(
+    title="상점 — 선물", money=100, currency_symbol="¤",
+    rows=[V.ShopRow(key="bandage", name="새 붕대", price=30, affordable=True),
+          V.ShopRow(key="ramen", name="컵라면", price=50, affordable=True),
+          V.ShopRow(key="sdat", name="SDAT", price=200, affordable=False)],
+    locked=[V.ShopRow(key="glasses", name="깨진 안경", price=400,
+                      need=60, locked=True)])
+got = ui.choose_shop(sv)
+print("SHOP:" + (got.key if got else "None"))
+"""
+
+ACTION = """
+import sys, types
+sys.path.insert(0, {root!r})
+from nervterm.ui.base import BaseUI
+from nervterm.ui import view as V
+from nervterm import ui as uimod, game
+uimod._active = BaseUI()
+g = object.__new__(game.Game)
+print("ACT:" + repr(game.Game.pick_action(g, ["옆에 앉는다", "묻는다", "하늘을 본다"])))
+"""
+
+
+def t_shop_pick():
+    """선물 목록에서 두 번째를 고른다."""
+    out = drive(SHOP.format(root=str(ROOT)),
+                ESC_SEQ["down"] + ESC_SEQ["enter"], wait=2.5)
+    for line in out.splitlines():
+        if "SHOP:" in line:
+            eq(line.split("SHOP:", 1)[1].strip(), "ramen", "두 번째 선물")
+            return
+    raise AssertionError(f"결과 없음:\n{out[-500:]}")
+
+
+def t_shop_skips_unaffordable():
+    """살 수 없는 것에 Enter 를 눌러도 통과되지 않는다."""
+    feed = (ESC_SEQ["down"] * 2 + ESC_SEQ["enter"] +   # SDAT — 잔고 부족
+            ESC_SEQ["up"] * 2 + ESC_SEQ["enter"])      # 되돌아와 붕대
+    out = drive(SHOP.format(root=str(ROOT)), feed, wait=2.5)
+    for line in out.splitlines():
+        if "SHOP:" in line:
+            eq(line.split("SHOP:", 1)[1].strip(), "bandage",
+               "잔고 부족 항목이 선택됐다")
+            return
+    raise AssertionError(f"결과 없음:\n{out[-500:]}")
+
+
+def t_action_choice():
+    """데이트 행동 — 두 번째 선택지."""
+    out = drive(ACTION.format(root=str(ROOT)),
+                ESC_SEQ["down"] + ESC_SEQ["enter"], wait=2.5)
+    for line in out.splitlines():
+        if "ACT:" in line:
+            eq(line.split("ACT:", 1)[1].strip(), "'묻는다'", "두 번째 행동")
+            return
+    raise AssertionError(f"결과 없음:\n{out[-500:]}")
+
+
+def t_action_typed():
+    """마지막 '직접 입력' 으로 내려가 직접 쓴 말이 행동이 된다."""
+    feed = (ESC_SEQ["down"] * 3 + ESC_SEQ["enter"] +
+            "손을 잡는다".encode("utf-8") + b"\r")
+    out = drive(ACTION.format(root=str(ROOT)), feed, wait=2.5)
+    for line in out.splitlines():
+        if "ACT:" in line:
+            eq(line.split("ACT:", 1)[1].strip(), "'손을 잡는다'", "직접 입력")
+            return
+    raise AssertionError(f"결과 없음:\n{out[-500:]}")
+
+
 TESTS = [
     ("방향키 4종", t_arrows),
     ("애플리케이션 커서 모드", t_arrows_app_mode),
@@ -243,6 +319,10 @@ TESTS = [
     ("선택기 — ESC 취소", t_chooser_esc_cancels),
     ("선택기 — 화살표에 튕기지 않음", t_chooser_does_not_exit_on_arrow),
     ("선택기 — 직접 입력", t_chooser_typed_input),
+    ("상점 — 고르기", t_shop_pick),
+    ("상점 — 잔고 부족은 안 골라진다", t_shop_skips_unaffordable),
+    ("데이트 행동 — 선택지", t_action_choice),
+    ("데이트 행동 — 직접 입력", t_action_typed),
 ]
 
 
