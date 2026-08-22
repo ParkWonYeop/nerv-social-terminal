@@ -8,6 +8,7 @@
 그래서 새 프로바이더를 붙이는 비용이 `complete()` 하나다.
 """
 import json
+import os
 import re
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.I)
@@ -55,13 +56,30 @@ class Provider:
         self.cfg = cfg or {}
 
     # ── 설정 읽기 ──────────────────────────────────────────────────────
+    #
+    # 모델과 주소는 **프로바이더별로** 저장한다 (llm.models.<id>).
+    # 하나만 두면 프로바이더를 바꿀 때 남의 모델 이름이 따라간다 —
+    # ollama 를 쓰다 claude-cli 로 돌아가면 `claude --model qwen3:14b` 가
+    # 나가서 unrecognized_model 로 죽는다. 설정 화면은 바꿀 때 지워
+    # 주지만, 환경변수나 설정 파일을 직접 고치는 길에는 그 보호가 없다.
+    def _per_provider(self, table: str, env_name: str) -> str:
+        # 환경변수는 이번 실행만, 지금 고른 프로바이더에 적용된다.
+        raw = os.environ.get(env_name, "").strip()
+        if raw:
+            return raw
+        got = self.cfg.get(table) or {}
+        if isinstance(got, dict):
+            return (got.get(self.id) or "").strip()
+        return ""
+
     @property
     def model(self) -> str:
-        return (self.cfg.get("model") or "").strip() or self.default_model
+        return (self._per_provider("models", "NERV_LLM_MODEL")
+                or self.default_model)
 
     @property
     def base_url(self) -> str:
-        return ((self.cfg.get("base_url") or "").strip()
+        return (self._per_provider("base_urls", "NERV_LLM_BASE_URL")
                 or self.default_base_url)
 
     @property

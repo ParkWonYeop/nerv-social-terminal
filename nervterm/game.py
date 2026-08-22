@@ -9,8 +9,8 @@ import os
 import random
 import uuid
 
-from . import (characters, config, db, economy, llm, persona, recall, scenes,
-               settings, stance, ui, world)
+from . import (characters, clock, config, db, economy, llm, persona, recall,
+               scenes, settings, stance, ui, world)
 from .ui import view as V
 
 HINT = [
@@ -78,11 +78,30 @@ class Game:
             terminal_name=w.terminal_name,
         )
 
+    def last_seen(self):
+        """(마지막 대화 시각, 직전 접속의 마지막 시각).
+
+        '며칠 만에 왔다' 만으로는 부족하다. 5분 전에 말하다 끊은 것과
+        어제 밤에 헤어진 것은 다르다.
+        """
+        row = self.con.execute(
+            "SELECT ts FROM dialogue WHERE player=? AND char=? "
+            "ORDER BY id DESC LIMIT 1", (db.PLAYER, self.char.id)).fetchone()
+        prev = self.con.execute(
+            "SELECT ts FROM dialogue WHERE player=? AND char=? AND sess<>? "
+            "ORDER BY id DESC LIMIT 1",
+            (db.PLAYER, self.char.id, self.sess)).fetchone()
+        return (row["ts"] if row else ""), (prev["ts"] if prev else "")
+
     def context(self, st, extra="", *, query="", with_convo=True, boring=""):
         con = self.con
         mems = [t for t, _ in recall.relevant(con, query, n=8)]
+        last_talk, last_sess = self.last_seen()
         return persona.context_block(
             self.char,
+            now_line=clock.now_line(),
+            gap_line=clock.gap_line(last_talk, last_sess),
+            odd_hour=clock.is_odd_hour() and st.tools > 0,
             stance_block=stance.block(con, stance.read(con), self.char,
                                       boring=boring),
             aff=st.affection, stage_name=st.stage,

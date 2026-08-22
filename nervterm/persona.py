@@ -73,13 +73,26 @@ JSON 에 두 필드를 더 넣는다.
 def context_block(char, *, aff, stage_name, stage_guide, money, today_tools,
                   today_commits, days_since, streak, memories,
                   currency="LCL", work_today="", work_past=None, last_convo="",
-                  this_convo="", danger_note="", stance_block=""):
+                  this_convo="", danger_note="", stance_block="",
+                  now_line="", gap_line="", odd_hour=False):
     """현재 상태를 시스템 프롬프트 뒤에 붙일 컨텍스트."""
     name = char.name
     last = "오늘도 왔다" if days_since == 0 else f"{days_since}일 만에 왔다"
     out = []
     if stance_block:
         out += [stance_block, ""]
+
+    # 시각을 맨 위에 둔다. 이게 없으면 캐릭터가 시간대를 추측하고,
+    # 틀린 추측 위에 없는 기억을 쌓는다.
+    if now_line:
+        out += ["[지금]", f"- {now_line}"]
+        if gap_line:
+            out.append(gap_line)
+        if odd_hour:
+            out.append("- 상대는 이런 시간까지 일하고 있다. "
+                       f"{name}라면 그냥 넘어가지 않을 수도 있다.")
+        out.append("")
+
     out += [
         "[지금 상황]",
         f"- 관계 단계: '{stage_name}'",
@@ -113,7 +126,13 @@ def context_block(char, *, aff, stage_name, stage_guide, money, today_tools,
             f"- 위 기록을 다 읊지 마라. {name}는 보고서를 읽어주는 사람이 아니다.",
             "- 하나만 골라 짧게 건드린다.",
             "- 기억하는 것을 자연스럽게 꺼내라. 다만 매번 꺼내지는 않는다.",
-            "- 모르는 것을 아는 척하지 마라."]
+            "- 모르는 것을 아는 척하지 마라.",
+            "",
+            "[시간을 다룰 때]",
+            "- 위에 적힌 시각이 지금이다. 다른 시간대를 상상하지 마라.",
+            "- 적혀 있지 않은 일을 지어내지 마라. 아침 이야기를 하려면 "
+            "지금이 아침이거나, 기억에 그 아침이 있어야 한다.",
+            "- 시간을 매번 언급할 필요는 없다. 걸릴 때만 짚는다."]
     return "\n".join(out)
 
 

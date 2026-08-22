@@ -214,10 +214,10 @@ def _llm_settings(con) -> None:
         elif got == "2":
             raw = term.ask_line(f"  모델 (엔터면 기본값 "
                                 f"{prov.default_model or '자동'}) > ")
-            settings.put("llm.model", (raw or "").strip())
+            settings.put(f"llm.models.{prov.id}", (raw or "").strip())
         elif got == "3":
             raw = term.ask_line(f"  주소 (엔터면 {prov.default_base_url}) > ")
-            settings.put("llm.base_url", (raw or "").strip())
+            settings.put(f"llm.base_urls.{prov.id}", (raw or "").strip())
         elif got == "4":
             raw = term.ask_line(f"  환경변수 이름 "
                                 f"(엔터면 {prov.default_key_env}) > ")
@@ -273,8 +273,8 @@ def _pick_provider(con) -> None:
             return
 
     settings.put("llm.provider", chosen.id)
-    # 프로바이더가 바뀌면 모델·주소는 그 프로바이더의 기본값으로 되돌린다.
-    # 남아 있으면 엉뚱한 모델 이름이 다른 서버로 날아간다.
+    # 모델·주소는 프로바이더별로 저장되므로 지울 필요가 없다.
+    # 옛 공용 키만 비워 둔다 — 그건 프로바이더가 바뀌면 뜻이 달라진다.
     settings.put("llm.model", "")
     settings.put("llm.base_url", "")
     ui.notice(f"{chosen.label} 로 바꿨다.", "good")

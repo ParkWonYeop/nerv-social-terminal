@@ -400,10 +400,14 @@ def _():
 @check("OpenAI 호환 — 주소로 과금 여부가 갈린다")
 def _():
     from nervterm import llm
-    local = llm.OpenAICompat({"base_url": "http://localhost:1234"})
+    local = llm.OpenAICompat(
+        {"base_urls": {"openai-compat": "http://localhost:1234"}})
     true(not local.is_billable(), "로컬인데 과금으로 봤다")
-    remote = llm.OpenAICompat({"base_url": "https://someone.example.com"})
+    remote = llm.OpenAICompat(
+        {"base_urls": {"openai-compat": "https://someone.example.com"}})
     true(remote.is_billable(), "바깥 주소인데 과금이 아니라고 봤다")
+    # 주소를 안 정했으면 기본값(로컬)이라 과금이 아니다
+    true(not llm.OpenAICompat({}).is_billable(), "기본값이 과금으로 잡혔다")
 
 
 @check("프로바이더 목록 — 전부 계약을 지킨다")
@@ -590,6 +594,86 @@ def _():
     os.utime(new, (time.time(), time.time()))
     order = agents.Agent.newest_first([old, new])
     eq(order[0].name, "new.jsonl", "오래된 파일을 먼저 읽는다")
+
+
+@check("시각 — 구간과 경과 시간을 사람 말로 적는다")
+def _():
+    import datetime as dt
+    from nervterm import clock
+    for hour, want in ((2, "심야"), (5, "새벽"), (8, "아침"),
+                       (14, "낮"), (18, "저녁"), (22, "밤")):
+        got = clock.now_line(dt.datetime(2026, 8, 22, hour, 30))
+        true(want in got, f"{hour}시가 '{want}' 이 아니다: {got}")
+    got = clock.now_line(dt.datetime(2026, 8, 22, 13, 49))
+    true("오후 1시 49분" in got, f"12시간제 표기: {got}")
+    true("(토)" in got, f"요일: {got}")
+
+    now = dt.datetime(2026, 8, 22, 13, 49)
+    for mins, want in ((1, "방금"), (25, "25분 전"), (300, "5시간 전"),
+                       (1500, "어제"), (5000, "3일 전")):
+        eq(clock.ago(now - dt.timedelta(minutes=mins), now), want,
+           f"{mins}분 전")
+    eq(clock.ago("", now), "", "빈 값")
+    eq(clock.ago("이건 시각이 아니다", now), "", "깨진 값")
+    eq(clock.ago(now + dt.timedelta(hours=1), now), "", "미래 시각")
+
+    true(clock.is_odd_hour(dt.datetime(2026, 8, 22, 3, 0)), "새벽 3시")
+    true(not clock.is_odd_hour(dt.datetime(2026, 8, 22, 14, 0)), "낮 2시")
+
+
+@check("시각 — 프롬프트에 시간 블록이 들어간다")
+def _():
+    import datetime as dt
+    from nervterm import characters, clock, db, game, world
+    characters.load(refresh=True)
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("rei")
+        db.set_char(char.id)
+        old = (dt.datetime.now() - dt.timedelta(hours=5)).isoformat(
+            timespec="seconds")
+        con.execute("INSERT INTO dialogue(player,char,ts,role,text,emotion,"
+                    "sess) VALUES(?,?,?,?,?,?,?)",
+                    (db.PLAYER, char.id, old, "rei", "그래.", "neutral", "옛"))
+        con.commit()
+        g = game.Game(con, char, offline=True, animate=False)
+        ctx = g.context(g.state())
+    true("[지금]" in ctx, "시간 블록이 없다")
+    true("시" in ctx and "분" in ctx, "시각 표기가 없다")
+    true("5시간 전" in ctx, f"경과 시간이 없다")
+    true("다른 시간대를 상상하지 마라" in ctx, "시간 취급 지침이 없다")
+
+
+@check("프로바이더 — 모델이 프로바이더별로 분리된다")
+def _():
+    from nervterm import llm
+    # 옛 방식(공용 키)에 남의 모델이 남아 있어도 따라가지 않는다.
+    cfg = {"provider": "claude-cli", "models": {"ollama": "qwen3:14b"}}
+    eq(llm.ClaudeCLI(cfg).model, "sonnet", "남의 모델이 따라왔다")
+    eq(llm.Ollama(cfg).model, "qwen3:14b", "자기 모델을 못 읽었다")
+    cfg2 = {"models": {"claude-cli": "opus", "ollama": "gemma"}}
+    eq(llm.ClaudeCLI(cfg2).model, "opus", "프로바이더별 저장")
+    eq(llm.Ollama(cfg2).model, "gemma", "프로바이더별 저장")
+
+
+@check("설정 — v2 의 공용 모델은 버려진다 (틀리면 조용히 죽으므로)")
+def _():
+    from nervterm import settings
+    p = settings.path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "version": 2,
+        "llm": {"provider": "claude-cli", "model": "qwen3:14b",
+                "base_url": "http://localhost:11434"}}), encoding="utf-8")
+    settings._cache = None
+    try:
+        got = settings.get("llm", {})
+        true("model" not in got, "공용 모델이 남았다")
+        eq(got.get("models"), {}, "추측해서 옮겼다")
+    finally:
+        p.write_text(json.dumps({"version": 3}), encoding="utf-8")
+        settings._cache = None
 
 
 @check("상태줄 위젯 — 캐시를 읽어 한두 줄을 그린다")

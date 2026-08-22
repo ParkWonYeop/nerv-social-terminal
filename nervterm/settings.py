@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import identity
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DEFAULTS = {
     "version": SCHEMA_VERSION,
@@ -34,8 +34,11 @@ DEFAULTS = {
     "llm": {
         # provider id — nervterm/llm/ 의 프로바이더 등록명
         "provider": "claude-cli",
-        "model": "",            # 빈 문자열이면 프로바이더 기본값
-        "base_url": "",         # 로컬/호환 서버용
+        # 모델·주소는 프로바이더별로 따로 둔다. 하나만 두면 프로바이더를
+        # 바꿀 때 남의 모델 이름이 따라가서 조용히 죽는다.
+        "models": {},           # {프로바이더id: 모델명}
+        "base_urls": {},        # {프로바이더id: 주소}
+
         "api_key_env": "",      # 키를 읽을 환경변수 이름
         # 0 이면 프로바이더별 기본값 (로컬 모델은 훨씬 길다)
         "timeout": 0,
@@ -233,6 +236,19 @@ def _migrate(raw: dict) -> dict:
     if v < 2:
         # v1 에는 plugins 섹션이 없었다 — 기본 플러그인으로 채워진다.
         raw["version"] = 2
+    if v < 3:
+        # v2 는 model/base_url 을 프로바이더 구분 없이 하나만 뒀다.
+        # 그 값이 어느 프로바이더 것이었는지 알 방법이 없다.
+        #
+        # 지금 골라 둔 프로바이더 것으로 추측해 옮길 수도 있지만, 틀리면
+        # `claude --model qwen3:14b` 같은 게 나가서 프로바이더가 조용히
+        # 죽는다. 틀렸을 때의 대가가 너무 크다. 그냥 버린다 —
+        # 기본 모델로 돌아갈 뿐이고, 필요하면 설정에서 다시 고르면 된다.
+        llm = raw.get("llm")
+        if isinstance(llm, dict):
+            llm.pop("model", None)
+            llm.pop("base_url", None)
+        raw["version"] = 3
     return raw
 
 
