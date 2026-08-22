@@ -161,10 +161,49 @@ class Ollama(Provider):
     label = "Ollama (로컬)"
     billing = BILLING_NONE
     wants_base_url = True
-    default_model = "qwen3:14b"
     default_base_url = "http://localhost:11434"
-    default_timeout = 240        # 로컬 모델은 느리다. 여기 14B 가 57초였다
+    default_timeout = 240        # 로컬 모델은 느리다
     note = "내 기계에서 돈다. 과금도 플랜 소모도 없다. 대신 느리고 덜 똑똑하다."
+
+    # 모델을 안 정했을 때 설치된 것 중에서 고르는 순서.
+    #
+    # 이 게임은 한국어 대사와 성격 유지가 전부다. 벤치마크 점수가 높은
+    # 모델이 아니라 **한국어를 자연스럽게 하고 말투를 지키는** 모델이
+    # 필요하다. 실측(레이·아스카·미사토 각 3턴):
+    #
+    #   exaone3.5:7.8b   ~12초  JSON 7/7  말투 정확 ("그래, 많이 했네.")
+    #   gemma3:12b       ~28초  준수      ("많이 했네." "…왜?")
+    #   qwen3:8b/14b     ~12초  JSON 실패 잦음, 설명조로 흐름
+    #
+    # qwen3 는 추론 모드를 끄지 않으면 한 턴에 30초를 더 쓴다.
+    PREFERRED = (
+        "exaone3.5", "exaone",        # LG. 한국어 특화. 지금 가장 나음
+        "gemma3", "gemma2",
+        "qwen3", "qwen2.5",
+        "llama3.1", "llama3",
+    )
+
+    _picked = None
+
+    @property
+    def model(self) -> str:
+        got = self._per_provider("models", "NERV_LLM_MODEL")
+        if got:
+            return got
+        if Ollama._picked is None:
+            Ollama._picked = self._auto_pick()
+        return Ollama._picked
+
+    def _auto_pick(self) -> str:
+        """설치된 모델 중 이 게임에 맞는 것. 없으면 빈 문자열."""
+        installed = self.models()
+        if not installed:
+            return ""
+        for want in self.PREFERRED:
+            for name in installed:
+                if name.startswith(want):
+                    return name
+        return installed[0]
 
     def available(self):
         req = urllib.request.Request(
@@ -197,11 +236,31 @@ class Ollama(Provider):
                 # format 에 스키마를 주면 ollama 가 문법 수준에서 강제한다.
                 # 작은 모델은 부탁만으로는 JSON 을 안 지킨다.
                 "format": RESPONSE_SCHEMA,
+                # 추론 모드를 끈다. qwen3 같은 모델은 기본으로 켜져 있어서
+                # 대사 한 줄 쓰기 전에 한참 생각한다. 실측 qwen3:14b 가
+                # 30.4초 → 2.1초. 14배다.
+                #
+                # 이 게임에 추론은 필요 없다. 캐릭터는 논리 문제를 푸는 게
+                # 아니라 성격대로 반응하면 되고, 오히려 길게 생각할수록
+                # 설명조의 밋밋한 대사가 나온다.
+                "think": False,
                 "messages": [{"role": "system", "content": system},
                              {"role": "user", "content": user}],
                 "options": {"temperature": 0.8, "num_predict": 700},
             },
             {}, timeout or self.timeout)
+        if not got:
+            # think 를 모르는 옛 ollama 일 수 있다. 한 번만 빼고 다시.
+            got = _post(
+                f"{self.base_url.rstrip('/')}/api/chat",
+                {
+                    "model": self.model, "stream": False,
+                    "format": RESPONSE_SCHEMA,
+                    "messages": [{"role": "system", "content": system},
+                                 {"role": "user", "content": user}],
+                    "options": {"temperature": 0.8, "num_predict": 700},
+                },
+                {}, timeout or self.timeout)
         if not got:
             return None
         return (got.get("message") or {}).get("content")
