@@ -100,8 +100,8 @@ def check_boring(con, text: str) -> str:
     return ""
 
 
-def check_broken_promises(con):
-    """지키지 않은 약속을 찾는다. [(text, 며칠 지났나)]"""
+def _broken_promise_rows(con):
+    """지키지 않은 약속. [(id, text, 며칠 지났나)] — 내부용."""
     rows = con.execute(
         "SELECT id,ts,text FROM memory WHERE player=? AND char=? "
         "AND kind='promise' ORDER BY id DESC LIMIT 10",
@@ -116,22 +116,32 @@ def check_broken_promises(con):
         except ValueError:
             continue
         if age >= config.PROMISE_GRACE_DAYS:
-            out.append((r["text"], age))
+            out.append((r["id"], r["text"], age))
     return out
 
 
+def check_broken_promises(con):
+    """지키지 않은 약속을 찾는다. [(text, 며칠 지났나)]
+
+    반환 모양은 UI 플러그인까지 흘러가는 공개 계약이다(뷰모델의
+    broken_promises) — id 가 필요하면 _broken_promise_rows 를 쓴다.
+    """
+    return [(text, age) for _, text, age in _broken_promise_rows(con)]
+
+
 def settle_promises(con):
-    """오래 방치된 약속만큼 신뢰를 깎는다. 한 약속당 한 번만."""
+    """오래 방치된 약속만큼 신뢰를 깎는다. 한 약속당 한 번만.
+
+    감점된 약속은 PROMISE_FORGET_DAYS 가 더 지나면 잊는다(done 처리).
+    감점이 항상 선행되므로 "오래 방치할수록 감점 없이 잊히는" 길은
+    없다 — 잊기는 penalized 플래그가 있는 약속에만 적용된다.
+    """
     hit = 0
-    for text, age in check_broken_promises(con):
-        row = con.execute(
-            "SELECT id FROM memory WHERE player=? AND char=? "
-            "AND kind='promise' AND text=?",
-            (db.PLAYER, db.CHAR, text)).fetchone()
-        if not row:
-            continue
-        key = f"promise_penalized_{row['id']}"
+    for pid, text, age in _broken_promise_rows(con):
+        key = f"promise_penalized_{pid}"
         if db.flag(con, key):
+            if age >= config.PROMISE_GRACE_DAYS + config.PROMISE_FORGET_DAYS:
+                db.flag(con, f"promise_done_{pid}", "1")
             continue
         db.flag(con, key, "1")
         move(con, "trust", config.TRUST_BROKEN_PROMISE)
