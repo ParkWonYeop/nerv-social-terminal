@@ -37,9 +37,17 @@ class Game:
         self.scan()
 
     def scan(self):
-        """트랜스크립트에서 새로 쌓인 작업 기록을 읽어들인다(증분)."""
+        """트랜스크립트에서 새로 쌓인 작업 기록을 읽어들인다(증분).
+
+        스캔은 즉시 커밋한다. 여기서 연 쓰기 트랜잭션을 다음 턴의
+        commit(LLM 호출 뒤)까지 들고 가면 그 사이 훅이 전부 락에 걸려
+        에이전트가 멈추고 적립이 유실된다. scan 은 턴 경계에서만 부른다
+        — 진행 중인 다른 변경과 섞여 커밋되는 일이 없게.
+        """
         try:
-            return self.work.scan(self.con)
+            n = self.work.scan(self.con)
+            self.con.commit()
+            return n
         except Exception:
             return 0
 

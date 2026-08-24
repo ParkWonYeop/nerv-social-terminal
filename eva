@@ -18,10 +18,18 @@ if ! command -v python3 >/dev/null 2>&1; then
     echo "python3 가 필요하다." >&2
     exit 1
 fi
-if ! python3 -c "import rich" 2>/dev/null; then
-    echo "rich 모듈이 필요하다:  python3 -m pip install --user rich" >&2
-    exit 1
-fi
+# rich 검사는 게임 경로에서만. 훅(hook)·위젯(line)은 rich 를 안 쓰는데,
+# 이 검사 하나가 파이썬 인터프리터를 통째로 한 번 더 띄운다 —
+# 도구 호출마다 띄는 훅에 그 비용을 붙일 이유가 없다.
+case "${1:-}" in
+    hook|line) ;;
+    *)
+        if ! python3 -c "import rich" 2>/dev/null; then
+            echo "rich 모듈이 필요하다:  python3 -m pip install --user rich" >&2
+            exit 1
+        fi
+        ;;
+esac
 
 cd "$root" || exit 1
 # 저장소가 공용 위치(/opt/rei)에 있을 수 있다. 바이트코드 캐시는

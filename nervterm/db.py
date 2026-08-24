@@ -125,6 +125,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_uniq
     ON work_facts(player, day, kind, text);
 """
 
+# 저장소 판(版). SCHEMA·GLOBAL_DEFAULTS·CHAR_DEFAULTS·LATER_COLUMNS·_migrate
+# 를 바꾸면 반드시 이 숫자를 올린다 — init() 은 판이 맞으면 DDL 전체를
+# 건너뛰므로(훅 지연 절감), 올리지 않으면 변경이 조용히 적용되지 않는다.
+# v1: char 열 없음 / v2: char 분리 / v3: user_version 도입
+SCHEMA_VERSION = 3
+
 # 전역 기본값 (char='')
 GLOBAL_DEFAULTS = {
     "lcl": "0",
@@ -171,15 +177,23 @@ def connect() -> sqlite3.Connection:
     con = sqlite3.connect(str(path), timeout=10.0)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA busy_timeout=8000")
+    # 1.5초. 락은 짧게 실패시키고 훅이 1회 재시도한다(hook.py).
+    # 길게 잡으면 락 경합 시 에이전트의 도구 호출이 그만큼 멈춘다.
+    con.execute("PRAGMA busy_timeout=1500")
     con.execute("PRAGMA synchronous=NORMAL")
     return con
 
 
 @contextmanager
-def session():
+def session(*, write: bool = False):
+    """write=True 는 훅 경로용 — 처음부터 쓰기 락(BEGIN IMMEDIATE)을 잡아
+    bump() 류 read-modify-write 문장 사이에 다른 프로세스가 끼지 못하게
+    한다. 게임처럼 오래 사는 연결에는 쓰지 않는다(락을 오래 쥐게 된다).
+    """
     con = connect()
     try:
+        if write:
+            con.execute("BEGIN IMMEDIATE")
         yield con
         con.commit()
     finally:
@@ -302,6 +316,28 @@ def seed_characters(con, ids=None) -> None:
                 "VALUES(?,?,?,?)", (PLAYER, cid, k, v))
 
 
+def _backup(con, ver: int) -> None:
+    """판 승격 직전 1회 백업 — 마이그레이션이 틀렸을 때의 유일한 복구
+    수단이다. 실패해도 진행한다(백업은 보험이지 관문이 아니다)."""
+    try:
+        path = config.db_path()
+        if not path.is_file():
+            return
+        bak = path.with_name(path.name + f".bak-v{ver}")
+        if bak.exists():
+            return
+        if con.in_transaction:
+            # session(write=True)이 방금 연 빈 트랜잭션 — checkpoint 는
+            # 트랜잭션 안에서 못 돈다. 승격 경로는 어차피 executescript
+            # 가 커밋하므로 여기서 닫아도 잃는 것이 없다.
+            con.commit()
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        import shutil
+        shutil.copy2(path, bak)
+    except Exception:
+        pass
+
+
 def init(con: sqlite3.Connection, *, with_characters: bool = None) -> None:
     """스키마를 맞추고 기본값을 채운다.
 
@@ -309,24 +345,36 @@ def init(con: sqlite3.Connection, *, with_characters: bool = None) -> None:
     아직 비어 있으면 그때는 어쩔 수 없이 채운다 — 안 그러면 훅이 먼저
     돈 사람의 첫 적립이 갈 곳이 없다.
     """
+    ver = con.execute("PRAGMA user_version").fetchone()[0]
+    if ver == SCHEMA_VERSION and con.execute(
+            "SELECT 1 FROM state WHERE player=? AND char='' AND key='created'",
+            (PLAYER,)).fetchone():
+        # 빠른 경로 — 판이 맞고 이 플레이어의 행도 있다. 매 훅마다
+        # DDL 20여 개를 돌릴 이유가 없다(PK 조회 1번으로 끝).
+        # executescript 를 타지 않으므로 session(write=True)이 잡은
+        # 트랜잭션도 그대로 유지된다.
+        return
+    if ver != SCHEMA_VERSION:
+        _backup(con, ver)
     _migrate(con)
-    con.executescript(SCHEMA)
+    con.executescript(SCHEMA)      # 주의: 진행 중 트랜잭션을 commit 한다
     _ensure_columns(con)
     for k, v in GLOBAL_DEFAULTS.items():
         con.execute(
             "INSERT OR IGNORE INTO state(player,char,key,value) VALUES(?,'',?,?)",
             (PLAYER, k, v))
 
+    skip_seed = False
     if with_characters is False:
-        empty = con.execute(
+        skip_seed = con.execute(
             "SELECT 1 FROM state WHERE player=? AND char<>'' LIMIT 1",
-            (PLAYER,)).fetchone() is None
-        if not empty:
-            return
-    seed_characters(con)
-    con.execute("UPDATE state SET value=? "
-                "WHERE player=? AND char='' AND key='created' AND value=''",
-                (now(), PLAYER))
+            (PLAYER,)).fetchone() is not None
+    if not skip_seed:
+        seed_characters(con)
+        con.execute("UPDATE state SET value=? "
+                    "WHERE player=? AND char='' AND key='created' AND value=''",
+                    (now(), PLAYER))
+    con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
 # ── state ──────────────────────────────────────────────────────────────
