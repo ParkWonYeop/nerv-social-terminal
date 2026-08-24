@@ -130,7 +130,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_uniq
 # 를 바꾸면 반드시 이 숫자를 올린다 — init() 은 판이 맞으면 DDL 전체를
 # 건너뛰므로(훅 지연 절감), 올리지 않으면 변경이 조용히 적용되지 않는다.
 # v1: char 열 없음 / v2: char 분리 / v3: user_version 도입
-SCHEMA_VERSION = 3
+# v4: 저장된 LLM 텍스트(기억·인상 등)의 대괄호·개행 정화
+SCHEMA_VERSION = 4
 
 # 전역 기본값 (char='')
 GLOBAL_DEFAULTS = {
@@ -347,6 +348,23 @@ def _backup(con, ver: int) -> None:
         pass
 
 
+def _sanitize_stored_text(con) -> None:
+    """v4 — normalize 정화 도입 이전에 저장된 LLM 텍스트를 한 번 씻는다.
+
+    기억·인상은 이후 모든 턴의 시스템 프롬프트에 실리므로, 대괄호가
+    남아 있으면 프롬프트 구획 위조가 과거 데이터를 통해 계속된다.
+    replace 는 멱등이라 판 승격마다 다시 돌아도 해가 없다.
+    """
+    strip = ("replace(replace(replace(replace({c},'[',' '),']',' '),"
+             "char(10),' '),char(13),' ')")
+    con.execute("UPDATE memory SET text=" + strip.format(c="text") +
+                " WHERE text GLOB '*[[]*' OR text GLOB '*]*'"
+                " OR text LIKE '%' || char(10) || '%'")
+    con.execute("UPDATE state SET value=" + strip.format(c="value") +
+                " WHERE key IN ('impression','doubts','mood')"
+                " AND (value GLOB '*[[]*' OR value GLOB '*]*')")
+
+
 def init(con: sqlite3.Connection, *, with_characters: bool = None) -> None:
     """스키마를 맞추고 기본값을 채운다.
 
@@ -371,6 +389,7 @@ def init(con: sqlite3.Connection, *, with_characters: bool = None) -> None:
     _migrate(con)
     con.executescript(SCHEMA)      # 주의: 진행 중 트랜잭션을 commit 한다
     _ensure_columns(con)
+    _sanitize_stored_text(con)
     for k, v in GLOBAL_DEFAULTS.items():
         con.execute(
             "INSERT OR IGNORE INTO state(player,char,key,value) VALUES(?,'',?,?)",

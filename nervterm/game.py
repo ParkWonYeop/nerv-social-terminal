@@ -500,9 +500,11 @@ class Game:
         self.redraw()
 
         # 2막: 판정
+        # line 은 모델이, action 은 사용자가 쓴 텍스트 — 대괄호·개행을
+        # 지워 [장소] 같은 구획 헤더를 위조하지 못하게 하고 넣는다.
         msg2 = (f"[장소] {name}\n{setting}\n\n"
-                f"[방금 {nm}가 한 말] {got['line']}\n"
-                f"[상대가 고른 행동] {action}\n\n"
+                f"[방금 {nm}가 한 말] {llm.inline_text(got['line'])}\n"
+                f"[상대가 고른 행동] {llm.inline_text(action)}\n\n"
                 f"이 행동에 대한 {nm}의 반응을 쓰라. 데이트의 마무리 장면이다.\n"
                 f"행동이 진심이고 {nm}를 향한 것이면 크게 마음이 움직인다(+4~+8). "
                 f"무난하면 +1~+3. 성의 없거나 {nm}를 도구 취급하면 음수(-5까지).")

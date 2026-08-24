@@ -12,7 +12,8 @@ None 이 오면 호출부가 사전 작성 대사를 쓴다. 그래서 모델이
 from .. import config, db, settings
 from . import guard
 from .base import (BILLING_API, BILLING_KO, BILLING_NONE,
-                   BILLING_SUBSCRIPTION, Provider, extract_json, normalize)
+                   BILLING_SUBSCRIPTION, Provider, extract_json, inline_text,
+                   normalize)
 from .cli import ClaudeCLI, CodexCLI, CodexLocalCLI
 from .http import AnthropicAPI, Ollama, OpenAIAPI, OpenAICompat
 
