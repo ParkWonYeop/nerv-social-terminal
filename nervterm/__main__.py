@@ -62,13 +62,15 @@ def restart() -> None:
 
 def show_plugins() -> int:
     found = plugins.discover()
-    if not found:
+    if not found and not plugins.PARSE_ERRORS:
         print("설치된 플러그인이 없다.")
         return 0
     print(f"{'종류':<10} {'id':<18} {'버전':<8} {'출처':<9} 상태")
     for (kind, pid), p in sorted(found.items()):
         state = "OK" if p.ok else f"오류: {p.error}"
         print(f"{kind:<10} {pid:<18} {p.version:<8} {p.source:<9} {state}")
+    for name, why in plugins.PARSE_ERRORS:
+        print(f"{'?':<10} {name:<18} {'-':<8} {'-':<9} 오류: {why}")
     print()
     print("찾는 곳:")
     for path, source in plugins.search_paths():

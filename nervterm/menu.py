@@ -103,6 +103,8 @@ def plugin_problems():
             out.append(f"{kind}:{pid} — {plug.error}")
     for pack, why in characters.LOAD_ERRORS:
         out.append(f"{pack} — {why}")
+    for name, why in plugins.PARSE_ERRORS:
+        out.append(f"{name} — {why}")
     if ui.LOAD_ERROR:
         out.append(ui.LOAD_ERROR)
     if world.LOAD_ERROR:

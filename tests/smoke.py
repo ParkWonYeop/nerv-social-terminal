@@ -909,6 +909,60 @@ def _():
         characters.load(refresh=True)
 
 
+@check("plugin.toml 미니 파서 — 인라인 주석·따옴표 안 #·배열")
+def _():
+    from nervterm.plugins import _parse_toml_mini
+    got = _parse_toml_mini(
+        '[plugin]\n'
+        'id = "demo"        # 주석\n'
+        "name = '데모' # 또 주석\n"
+        'color = "#ff0000"\n'
+        'tags = [ "a#b", "c" ]\n'
+        'count = 3 # 숫자\n'
+        'flag = true\n'
+        '[character]\n'
+        'world = "nerv"      # 이 팩이 전제하는 세계관\n')
+    eq(got["plugin"]["id"], "demo", "따옴표 값 뒤 인라인 주석")
+    eq(got["plugin"]["name"], "데모", "싱글쿼트 뒤 주석")
+    eq(got["plugin"]["color"], "#ff0000", "따옴표 안 # 은 값")
+    eq(got["plugin"]["tags"], ["a#b", "c"], "배열 원소 안 #")
+    eq(got["plugin"]["count"], 3, "주석 딸린 정수")
+    eq(got["plugin"]["flag"], True, "불리언")
+    eq(got["character"]["world"], "nerv", "문서 예제 그대로")
+
+
+@check("plugin.toml 미니 파서 — tomllib 과 같은 결과 (동봉 플러그인 전부)")
+def _():
+    from nervterm import plugins
+    try:
+        import tomllib
+    except ImportError:
+        return                    # 3.9/3.10 — 비교 대상이 없다
+    for base, _src in plugins.search_paths():
+        if not base.is_dir():
+            continue
+        for mf in sorted(base.glob("*/plugin.toml")):
+            text = mf.read_text(encoding="utf-8")
+            eq(plugins._parse_toml_mini(text), tomllib.loads(text), str(mf))
+
+
+@check("깨진 plugin.toml — 사라지지 않고 사유가 남는다")
+def _():
+    import shutil
+    from nervterm import identity, plugins
+    broken = identity.data_dir() / "plugins" / "broken-pack"
+    broken.mkdir(parents=True, exist_ok=True)
+    # UTF-8 로 읽을 수 없는 바이트 — read_manifest 가 실제로 던지는 경로
+    (broken / "plugin.toml").write_bytes(b"[plugin]\nid = \xff\xfe")
+    try:
+        plugins.discover(refresh=True)
+        true(any(name == "broken-pack" for name, _ in plugins.PARSE_ERRORS),
+             "PARSE_ERRORS 에 없다")
+    finally:
+        shutil.rmtree(broken, ignore_errors=True)
+        plugins.discover(refresh=True)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 def main() -> int:
     import shutil
