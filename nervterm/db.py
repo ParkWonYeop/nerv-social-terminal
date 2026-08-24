@@ -7,6 +7,7 @@
 훅(짧은 프로세스)과 게임(긴 프로세스)이 동시에 붙으므로 WAL + busy_timeout.
 """
 import datetime as _dt
+import os
 import sqlite3
 from contextlib import contextmanager
 
@@ -175,6 +176,14 @@ def connect() -> sqlite3.Connection:
     path = config.db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(path), timeout=10.0)
+    # 저장소에는 사용자의 프롬프트·커밋 메시지가 담긴다 — 남이 읽을
+    # 이유가 없다. 공용 서버(umask 022)에서도 0600 을 보장한다.
+    # 소유자가 아니면(공용 배치 등) 실패해도 그대로 간다 — 보험이다.
+    for _sfx in ("", "-wal", "-shm"):
+        try:
+            os.chmod(str(path) + _sfx, 0o600)
+        except OSError:
+            pass
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     # 1.5초. 락은 짧게 실패시키고 훅이 1회 재시도한다(hook.py).
@@ -354,7 +363,10 @@ def init(con: sqlite3.Connection, *, with_characters: bool = None) -> None:
         # executescript 를 타지 않으므로 session(write=True)이 잡은
         # 트랜잭션도 그대로 유지된다.
         return
-    if ver != SCHEMA_VERSION:
+    if ver != SCHEMA_VERSION and con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+            ).fetchone():
+        # 빈 새 파일은 백업할 것이 없다 — 기존 저장소의 승격만 백업한다.
         _backup(con, ver)
     _migrate(con)
     con.executescript(SCHEMA)      # 주의: 진행 중 트랜잭션을 commit 한다

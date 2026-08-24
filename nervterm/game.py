@@ -105,6 +105,13 @@ class Game:
         con = self.con
         mems = [t for t, _ in recall.relevant(con, query, n=8)]
         last_talk, last_sess = self.last_seen()
+        # 과금(=외부 API) 프로바이더에는 근무 기록 원문(프롬프트·커밋
+        # 메시지)을 보내지 않는다 — 집계(도구/커밋 횟수)만 싣는다.
+        # 원문 전송은 privacy.send_work_text 로 옵트인. 구독 CLI·로컬
+        # 서버는 제한하지 않는다 — 그 세션 기록 자체가 그 계정/기계에서
+        # 나온 것이라 새로 새는 정보가 없다.
+        send_text = (not llm.is_billable()
+                     or bool(settings.get("privacy.send_work_text", False)))
         return persona.context_block(
             self.char,
             now_line=clock.now_line(),
@@ -118,8 +125,8 @@ class Game:
             today_tools=st.tools, today_commits=st.commits,
             days_since=economy.days_since_active(con),
             streak=st.streak, memories=mems,
-            work_today=self.work.digest(con),
-            work_past=self.work.past_days(con, 3),
+            work_today=self.work.digest(con) if send_text else "",
+            work_past=self.work.past_days(con, 3) if send_text else [],
             last_convo=recall.render(
                 recall.last_conversation(con, self.sess, 6), self.char.name),
             this_convo=recall.render(

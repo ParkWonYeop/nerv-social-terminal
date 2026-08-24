@@ -17,6 +17,7 @@ def _log(msg: str, *, always: bool = False) -> None:
         config.log_path().parent.mkdir(parents=True, exist_ok=True)
         with open(config.log_path(), "a", encoding="utf-8") as f:
             f.write(msg.rstrip() + "\n")
+        os.chmod(config.log_path(), 0o600)
     except Exception:
         pass
 
