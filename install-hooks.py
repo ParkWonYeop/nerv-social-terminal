@@ -22,6 +22,7 @@ import argparse
 import datetime
 import json
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -30,12 +31,16 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from nervterm import agents                                   # noqa: E402
+from nervterm.settings import write_json_atomic               # noqa: E402
 
-CMD = str(ROOT / "eva") + " hook"
+# 훅 command 는 셸로 실행된다 — 경로에 공백이 있으면 인용 없이는
+# 설치가 성공한 것처럼 보이고 훅만 조용히 안 돈다.
+CMD = shlex.quote(str(ROOT / "eva")) + " hook"
 MANAGED = Path("/etc/claude-code/managed-settings.json")
 
-TOOL_MATCHER = ("Bash|Edit|Write|NotebookEdit|Read|Grep|Glob|WebFetch|"
-                "WebSearch|Agent|Task|TaskCreate|TaskUpdate|Skill|TodoWrite")
+# 앵커 필수 — 없으면 mcp__foo__Read 같은 MCP 도구 이름에도 걸린다.
+TOOL_MATCHER = ("^(Bash|Edit|Write|NotebookEdit|Read|Grep|Glob|WebFetch|"
+                "WebSearch|Agent|Task|TaskCreate|TaskUpdate|Skill|TodoWrite)$")
 
 
 def wanted_for(agent):
@@ -50,35 +55,43 @@ def load(target: Path) -> dict:
     if not target.exists():
         return {}
     try:
-        return json.loads(target.read_text(encoding="utf-8"))
+        raw = json.loads(target.read_text(encoding="utf-8"))
     except Exception as exc:                                  # noqa: BLE001
         sys.exit(f"{target} 을 읽을 수 없습니다: {exc}")
+    if not isinstance(raw, dict):
+        sys.exit(f"{target} 이 JSON 객체가 아닙니다 — 손대지 않았습니다.")
+    return raw
 
 
 def merge(cfg: dict, agent, *, remove=False):
     """훅을 병합한다. 바뀐 내용의 설명 목록을 돌려준다."""
     hooks = cfg.setdefault("hooks", {})
     changed = []
-    for event, matcher in wanted_for(agent).items():
-        arr = hooks.setdefault(event, [])
+    # 우리 훅은 **모든** 이벤트에서 먼저 걷어낸다. wanted 이벤트만 돌면
+    # 목록에서 빠진 이벤트(예: 폐기된 PostToolUseFailure)에 남은 잔존
+    # 등록을 재설치로도 영원히 못 지운다.
+    for event in list(hooks.keys()):
+        arr = hooks.get(event)
+        if not isinstance(arr, list):
+            continue
         before = len(arr)
-        # 항상 먼저 우리 것을 걷어낸다 — 여러 번 실행해도 중복되지 않게.
         arr[:] = [e for e in arr if not agents.is_our_hook(e)]
         if before != len(arr):
             changed.append(f"  - {event}: 기존 EVA 훅 제거")
-        if remove:
-            if not arr:
-                hooks.pop(event, None)
-            continue
+        if not arr:
+            hooks.pop(event, None)
+    if remove:
+        if not hooks:
+            cfg.pop("hooks", None)
+        return changed
+    for event, matcher in wanted_for(agent).items():
         entry = {"hooks": [{"type": "command", "command": CMD,
                             "timeout": agent.hook_timeout(event)}]}
         if matcher:
             entry["matcher"] = matcher
-        arr.append(entry)
+        hooks.setdefault(event, []).append(entry)
         changed.append(f"  + {event}: EVA 훅 추가"
                        + (f" (matcher: {matcher[:30]}…)" if matcher else ""))
-    if remove and not hooks:
-        cfg.pop("hooks", None)
     return changed
 
 
@@ -96,11 +109,37 @@ def survey(cfg: dict):
     return kept
 
 
+def backup(target: Path) -> None:
+    if not target.exists():
+        return
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    bak = target.with_suffix(f"{target.suffix}.eva-{stamp}.bak")
+    shutil.copy2(target, bak)
+    print(f"\n백업: {bak}")
+
+
+def save(target: Path, cfg: dict, args) -> None:
+    # 원자적 쓰기(tempfile + os.replace) — 디스크 풀·중단으로 사용자의
+    # 에이전트 설정이 잘린 채 남지 않게. 권한은 기존 파일 것을 보존한다.
+    write_json_atomic(target, cfg,
+                      mode=0o644 if args.managed else None)
+    print(f"저장: {target}")
+
+
 def apply_to(target: Path, agent, args) -> None:
     print(f"\n═══ {agent.label}  →  {target}")
+    if args.uninstall and not target.exists():
+        print("  (설치돼 있지 않다 — 건너뛴다)")
+        return
     cfg = load(target)
     kept = survey(cfg)
     changed = merge(cfg, agent, remove=args.uninstall)
+    # 상태줄도 같은 파일이면 여기서 한 번에 — load/save 사이클을 두 번
+    # 돌면 그 틈에 Claude Code 본체가 쓴 변경(모델·permissions)이
+    # 유실되고, 백업도 실행마다 2개씩 쌓인다.
+    if (agent.id == "claude" and not args.managed
+            and (args.statusline or args.uninstall)):
+        changed += merge_statusline(cfg, args)
 
     print("기존 훅 (그대로 보존됨):")
     print("\n".join(kept) if kept else "  (없음)")
@@ -111,18 +150,8 @@ def apply_to(target: Path, agent, args) -> None:
         print("\n--dry-run 이므로 저장하지 않았습니다.")
         return
 
-    if target.exists():
-        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        bak = target.with_suffix(f"{target.suffix}.eva-{stamp}.bak")
-        shutil.copy2(target, bak)
-        print(f"\n백업: {bak}")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
-                      encoding="utf-8")
-    if args.managed:
-        os.chmod(target, 0o644)   # 모든 사용자의 에이전트가 읽어야 한다
-    print(f"저장: {target}")
+    backup(target)
+    save(target, cfg, args)
 
     if not args.uninstall:
         if agent.id == "codex":
@@ -133,7 +162,8 @@ def apply_to(target: Path, agent, args) -> None:
         print(f"\n{agent.label} 의 새 세션부터 적용됩니다.")
 
 
-WIDGET_CMD = f"{sys.executable} {ROOT / 'nervterm' / 'widget.py'}"
+WIDGET_CMD = (shlex.quote(sys.executable) + " "
+              + shlex.quote(str(ROOT / "nervterm" / "widget.py")))
 
 
 def is_our_statusline(cfg) -> bool:
@@ -141,55 +171,46 @@ def is_our_statusline(cfg) -> bool:
     return "nervterm/widget.py" in str(got) or "nervterm.widget" in str(got)
 
 
-def apply_statusline(args) -> None:
-    """Claude Code 터미널 하단에 상태줄 위젯을 붙인다.
+def merge_statusline(cfg: dict, args) -> list:
+    """cfg 에 상태줄 변경을 반영한다. 바뀐 내용 설명 목록을 돌려준다.
 
     남의 상태줄이 이미 있으면 덮지 않는다. 상태줄은 하나뿐이라
     덮으면 그 사람이 쓰던 게 사라진다.
     """
+    existing = cfg.get("statusLine")
+    if args.uninstall:
+        if not existing:
+            return []
+        if not is_our_statusline(cfg):
+            return ["  · 남의 상태줄은 건드리지 않는다: "
+                    + str(existing.get("command"))[:60]]
+        cfg.pop("statusLine", None)
+        return ["  - 상태줄 제거"]
+    if existing and not is_our_statusline(cfg):
+        return ["  · 이미 다른 상태줄이 있다. 덮지 않는다: "
+                + str(existing.get("command"))[:60]]
+    cfg["statusLine"] = {
+        "type": "command",
+        "command": WIDGET_CMD,
+        "padding": 0,
+    }
+    return [f"  + 상태줄 추가: {WIDGET_CMD}"]
+
+
+def apply_statusline(args) -> None:
+    """상태줄만 단독으로 적용한다(--only-statusline, codex 단독 설치)."""
     target = Path.home() / ".claude" / "settings.json"
     print(f"\n═══ 상태줄 위젯  →  {target}")
     cfg = load(target)
-    existing = cfg.get("statusLine")
-
-    if args.uninstall:
-        if not existing:
-            print("  (설치돼 있지 않다)")
-            return
-        if not is_our_statusline(cfg):
-            print("  남의 상태줄이다. 건드리지 않는다:")
-            print(f"    {str(existing.get('command'))[:70]}")
-            return
-        cfg.pop("statusLine", None)
-        print("  - 상태줄 제거")
-    else:
-        if existing and not is_our_statusline(cfg):
-            print("  이미 다른 상태줄이 설정돼 있다. 덮지 않는다:")
-            print(f"    {str(existing.get('command'))[:70]}")
-            print("  바꾸려면 ~/.claude/settings.json 의 statusLine 을 지우고")
-            print("  다시 실행하라.")
-            return
-        cfg["statusLine"] = {
-            "type": "command",
-            "command": WIDGET_CMD,
-            "padding": 0,
-        }
-        print(f"  + 상태줄 추가")
-        print(f"    {WIDGET_CMD}")
-
+    changed = merge_statusline(cfg, args)
+    print("\n".join(changed) if changed else "  (바꿀 것이 없다)")
+    if not changed:
+        return
     if args.dry_run:
         print("\n  --dry-run 이므로 저장하지 않았습니다.")
         return
-
-    if target.exists():
-        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        bak = target.with_suffix(f"{target.suffix}.eva-{stamp}.bak")
-        shutil.copy2(target, bak)
-        print(f"  백업: {bak}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
-                      encoding="utf-8")
-    print(f"  저장: {target}")
+    backup(target)
+    save(target, cfg, args)
     if not args.uninstall:
         print("\n  새 Claude Code 세션부터 하단에 뜬다.")
         print("  한 번은 eva 를 켜서 상대를 골라야 표시할 것이 생긴다.")
@@ -236,7 +257,8 @@ def main() -> int:
         target = MANAGED if args.managed else agent.hook_path()
         apply_to(target, agent, args)
 
-    if args.statusline or args.uninstall:
+    folded = "claude" in picked and not args.managed
+    if (args.statusline or args.uninstall) and not folded:
         apply_statusline(args)
 
     if not args.dry_run:

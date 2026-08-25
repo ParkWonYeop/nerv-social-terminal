@@ -13,7 +13,7 @@ OLD_LINK="${BIN}/rei"
 case "${1:-}" in
   --uninstall)
       rm -f "$LINK" "$OLD_LINK" && echo "제거: $LINK"
-      python3 "${ROOT}/install-hooks.py" --uninstall
+      python3 "${ROOT}/install-hooks.py" --uninstall --agent all
       echo
       echo "저장 데이터는 남겨 뒀다: $(python3 -c "
 import sys; sys.path.insert(0,'${ROOT}')
