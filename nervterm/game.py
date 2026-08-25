@@ -10,8 +10,21 @@ import random
 import uuid
 
 from . import (characters, clock, config, db, economy, llm, persona, recall,
-               scenes, settings, stance, ui, world)
+               settings, stance, ui, world)
 from .ui import view as V
+
+def catalog(items: dict, aff: int, *, locked: bool = False):
+    """선물(gifts)·데이트(dates) 공용 목록.
+
+    항목 튜플의 [1]=가격, [2]=최소 호감도. locked=False 는 열린 것을
+    가격순으로, True 는 잠긴 것을 필요 호감도순으로 준다.
+    """
+    if locked:
+        return [(k, v) for k, v in
+                sorted(items.items(), key=lambda x: x[1][2]) if aff < v[2]]
+    return [(k, v) for k, v in
+            sorted(items.items(), key=lambda x: x[1][1]) if aff >= v[2]]
+
 
 HINT = [
     V.Hint("/date", "데이트"), V.Hint("/gift", "선물"),
@@ -30,10 +43,8 @@ class Game:
         self.framed = False    # 하단 고정 프레임이 화면에 그려져 있는가
         self.sess = uuid.uuid4().hex[:12]      # 이번 접속 식별자
         self.typing = settings.get("typing_speed", 0.028)
-        recall.ensure(con)
         from . import work
         self.work = work
-        work.ensure(con)
         self.scan()
 
     def scan(self):
@@ -101,7 +112,7 @@ class Game:
             (db.PLAYER, self.char.id, self.sess)).fetchone()
         return (row["ts"] if row else ""), (prev["ts"] if prev else "")
 
-    def context(self, st, extra="", *, query="", with_convo=True, boring=""):
+    def context(self, st, extra="", *, query="", boring=""):
         con = self.con
         mems = [t for t, _ in recall.relevant(con, query, n=8)]
         last_talk, last_sess = self.last_seen()
@@ -131,7 +142,7 @@ class Game:
                 recall.last_conversation(con, self.sess, 6), self.char.name),
             this_convo=recall.render(
                 recall.this_conversation(con, self.sess, 8),
-                self.char.name) if with_convo else "",
+                self.char.name),
             danger_note=extra or db.flag(con, "last_danger"),
         )
 
@@ -242,6 +253,11 @@ class Game:
         chilled = stance.decay_interest(self.con, days)
         broken = stance.settle_promises(self.con)
         db.bump(self.con, "met_count", 1)
+        # 게임 접속도 활동이다 — 없으면 매일 게임만 켜는 사람에게
+        # "N일 만에 왔다"는 거짓말과 방치 감점이 반복된다.
+        # settle_neglect 뒤여야 한다: 앞이면 방치 일수가 0으로 계산돼
+        # 감점 자체가 사라진다.
+        economy.touch_activity(self.con)
         self.con.commit()
         st = self.state()
         danger = db.flag(self.con, "last_danger")
@@ -290,8 +306,11 @@ class Game:
             self.page()
             ui.dim("무슨 말을 할까?")
             return
-        st = self.state()
+        # 스캔을 먼저 — state() 의 도구/커밋 수와 work digest 가 같은
+        # 시점을 보게. 반대면 한 프롬프트 안에서 "도구 0회"와 오늘 고친
+        # 파일 목록이 함께 실린다.
         self.scan()
+        st = self.state()
         boring = stance.check_boring(self.con, text)
         self.push("user", text)
         db.say(self.con, "user", text, "", self.sess)
@@ -317,7 +336,7 @@ class Game:
     # ── 선물 ───────────────────────────────────────────────────────────
     def gift_view(self, st) -> V.ShopView:
         rows = []
-        for k, (name, price, need, _, _) in scenes.gift_list(
+        for k, (name, price, need, _, _) in catalog(
                 self.char.gifts, st.affection):
             owned = self.con.execute(
                 "SELECT given FROM owned WHERE player=? AND char=? AND item=?",
@@ -328,8 +347,8 @@ class Game:
                 given=(owned["given"] if owned else 0)))
         locked = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
                             locked=True)
-                  for k, v in scenes.locked_gifts(self.char.gifts,
-                                                  st.affection)]
+                  for k, v in catalog(self.char.gifts, st.affection,
+                                      locked=True)]
         return V.ShopView(title="상점 — 선물", rows=rows, locked=locked,
                           money=st.money,
                           currency_symbol=st.currency_symbol,
@@ -407,11 +426,11 @@ class Game:
     def date_view(self, st) -> V.ShopView:
         rows = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
                           affordable=st.money >= v[1])
-                for k, v in scenes.date_list(self.char.dates, st.affection)]
+                for k, v in catalog(self.char.dates, st.affection)]
         locked = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
                             locked=True)
-                  for k, v in scenes.locked_dates(self.char.dates,
-                                                  st.affection)]
+                  for k, v in catalog(self.char.dates, st.affection,
+                                      locked=True)]
         return V.ShopView(title="갈 수 있는 곳", rows=rows, locked=locked,
                           money=st.money,
                           currency_symbol=st.currency_symbol,

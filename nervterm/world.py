@@ -70,18 +70,6 @@ def active():
     return _active if _active is not None else load()
 
 
-def money(amount) -> str:
-    return active().money(amount)
-
-
-def currency_name() -> str:
-    return active().currency_name
-
-
-def currency_symbol() -> str:
-    return active().currency_symbol
-
-
 def use(world_id: str):
     """세계관을 바꾼다(설정 화면용).
 

@@ -21,7 +21,7 @@
 ![Python](https://img.shields.io/badge/python-3.9+-9ec5e0?style=flat-square)
 ![TUI](https://img.shields.io/badge/TUI-rich-e0764a?style=flat-square)
 ![Agents](https://img.shields.io/badge/Claude_Code-·_Codex-a98bd0?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-62-8fbf9a?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-79-8fbf9a?style=flat-square)
 
 </div>
 

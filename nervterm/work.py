@@ -17,11 +17,6 @@ from . import agents, db
 MAX_BYTES_PER_SCAN = 4_000_000        # 한 번에 읽을 상한(폭주 방지)
 
 
-def ensure(con):
-    """스키마는 db.init 이 만든다. 여기서는 아무것도 하지 않는다."""
-    return None
-
-
 def _add(con, day, ts, kind, text, sid="", agent="claude"):
     text = (text or "").strip()
     if not text:
@@ -64,29 +59,33 @@ def _scan_agent(con, agent, budget) -> int:
         if read_total >= budget:
             break
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
+            # 바이너리로 읽는다 — 텍스트 모드 + errors="replace" 는 잘못된
+            # 바이트 1개가 U+FFFD(재인코딩 시 3바이트)로 바뀌어 바이트
+            # 오프셋이 영구히 어긋났다. 오프셋 계산은 바이트로만 한다.
+            with open(path, "rb") as f:
                 f.seek(offset)
                 want = budget - read_total
-                chunk = f.read(want)
-                consumed = len(chunk.encode("utf-8", "replace"))
-                if chunk and not chunk.endswith("\n"):
-                    cut = chunk.rfind("\n")
+                blob = f.read(want)
+                consumed = len(blob)
+                if blob and not blob.endswith(b"\n"):
+                    cut = blob.rfind(b"\n")
                     if cut >= 0:
-                        dropped = chunk[cut + 1:]
-                        chunk = chunk[:cut + 1]
-                        consumed -= len(dropped.encode("utf-8", "replace"))
-                    elif len(chunk) == want:
+                        blob = blob[:cut + 1]
+                        consumed = cut + 1
+                    elif consumed == want:
                         # 개행 없는 초대형 한 줄 — 파싱을 포기하고 건너뛴다.
                         # consumed 를 유지해 offset 이 전진해야 이 파일이
                         # 매 스캔마다 예산만 태우며 멈춰 있지 않는다.
-                        chunk = ""
+                        blob = b""
                     else:
                         # 파일 끝이 아직 개행 전 — 쓰는 중이니 다음에 다시
-                        chunk = ""
+                        blob = b""
                         consumed = 0
                 sid = path.stem
-                for line in chunk.splitlines():
-                    line = line.strip()
+                # 옛(텍스트 모드) 오프셋이 줄 중간을 가리켜도 그 줄만
+                # json.loads 에서 버려지고 다음 줄부터 저절로 재동기화된다.
+                for bline in blob.split(b"\n"):
+                    line = bline.decode("utf-8", "replace").strip()
                     if not line:
                         continue
                     try:

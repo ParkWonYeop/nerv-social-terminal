@@ -51,8 +51,15 @@ def _load_pack(plug):
 
 
 def load(*, refresh: bool = False):
-    """설치된 캐릭터 팩을 전부 읽어 명부를 다시 만든다."""
+    """설치된 캐릭터 팩을 전부 읽어 명부를 다시 만든다.
+
+    refresh=False 면 이미 만든 명부를 그대로 쓴다 — 임포트 시점에 한 번
+    채워지므로, 매 호출마다 플러그인 발견·파일시스템을 다시 도는 비용을
+    붙이지 않는다.
+    """
     global ALL, IDS, ENABLED, PACKS, LOAD_ERRORS
+    if ALL and not refresh:
+        return
     ALL, PACKS, LOAD_ERRORS = {}, {}, []
     enabled = []
 
