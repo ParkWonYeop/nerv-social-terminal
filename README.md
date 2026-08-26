@@ -749,7 +749,7 @@ REI_HOOK_DEBUG=1                                hook.log 에 훅 동작 기록
 ### 動作試験
 
 ```bash
-python3 tests/smoke.py    # 계통 시험 35건
+python3 tests/smoke.py    # 계통 시험 61건
 python3 tests/keys.py     # 입력 시험 18건 (의사 터미널)
 ```
 
@@ -776,6 +776,14 @@ python3 tests/keys.py     # 입력 시험 18건 (의사 터미널)
 ```
 
 **[부품 제작 규격서 →](docs/plugins.md)**
+
+---
+
+**코드는 [MIT 라이선스](LICENSE)** 입니다. 자유롭게 쓰고 고치고 배포하십시오.
+
+라이선스가 덮는 것은 이 저장소가 작성한 코드뿐입니다. 동봉된 인격 모형과
+세계 설정(`plugins/eva-characters/` 등)은 아래 팬 워크 고지를 따릅니다 —
+MIT 는 원저작물의 권리를 넘겨줄 수 없습니다.
 
 ---
 
