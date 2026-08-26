@@ -103,6 +103,8 @@ def plugin_problems():
             out.append(f"{kind}:{pid} — {plug.error}")
     for pack, why in characters.LOAD_ERRORS:
         out.append(f"{pack} — {why}")
+    for name, why in plugins.PARSE_ERRORS:
+        out.append(f"{name} — {why}")
     if ui.LOAD_ERROR:
         out.append(ui.LOAD_ERROR)
     if world.LOAD_ERROR:
@@ -195,6 +197,16 @@ def _llm_settings(con) -> None:
                       else "상한 없음",
                 tone="danger" if not guard.daily_cap() else "plain",
                 note=f"오늘 {guard.used_today(con)}회 썼다"))
+        if prov.is_billable():
+            send = bool(settings.get("privacy.send_work_text", False))
+            items.append(lock(V.MenuItem(
+                "7", "근무 기록 원문 전송",
+                value="켬" if send else "끔 (집계만)",
+                tone="danger" if send else "plain",
+                note=("프롬프트·커밋 메시지 원문이 이 프로바이더로 나간다"
+                      if send else
+                      "끔이면 도구·커밋 횟수만 보낸다. 원문은 로컬에만")),
+                "privacy.send_work_text"))
         items.append(V.MenuItem("t", "지금 연결 시험",
                                 note="한 턴 실제로 불러 본다"))
 
@@ -228,6 +240,9 @@ def _llm_settings(con) -> None:
             raw = term.ask_line("  유료 호출 하루 상한 (0 이면 무제한) > ")
             if raw and raw.isdigit():
                 settings.put("llm.api_daily_call_cap", int(raw))
+        elif got == "7" and prov.is_billable():
+            settings.put("privacy.send_work_text",
+                         not settings.get("privacy.send_work_text", False))
         elif got == "t":
             _test_connection(con)
 

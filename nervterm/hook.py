@@ -9,16 +9,35 @@ import os
 import sys
 
 
-def _debug(msg: str) -> None:
-    if not os.environ.get("REI_HOOK_DEBUG"):
+def _log(msg: str, *, always: bool = False) -> None:
+    if not always and not os.environ.get("REI_HOOK_DEBUG"):
         return
     try:
         from . import config
         config.log_path().parent.mkdir(parents=True, exist_ok=True)
         with open(config.log_path(), "a", encoding="utf-8") as f:
             f.write(msg.rstrip() + "\n")
+        os.chmod(config.log_path(), 0o600)
     except Exception:
         pass
+
+
+def _debug(msg: str) -> None:
+    _log(msg)
+
+
+def _note(msg: str) -> None:
+    """디버그 플래그와 무관하게 남긴다 — 락 실패·느린 훅처럼 '조용한
+    유실' 이 되기 쉬운 사건은 항상 관측 가능해야 한다."""
+    import datetime
+    _log(f"{datetime.datetime.now().isoformat(timespec='seconds')} {msg}",
+         always=True)
+
+
+def _locked(exc) -> bool:
+    import sqlite3
+    return (isinstance(exc, sqlite3.OperationalError)
+            and "locked" in str(exc).lower())
 
 
 def _tool_ok(event: str, payload: dict) -> bool:
@@ -39,7 +58,7 @@ def _run(payload: dict) -> None:
     event = payload.get("hook_event_name", "")
     sid = payload.get("session_id", "") or ""
 
-    with db.session() as con:
+    with db.session(write=True) as con:
         # 캐릭터 데이터는 안 쓴다 — 플러그인을 읽지 않는다.
         db.init(con, with_characters=False)
 
@@ -91,10 +110,26 @@ def main() -> int:
         payload = json.loads(raw)
     except Exception:
         return 0
+    import time
+    t0 = time.monotonic()
     try:
         _run(payload)
     except Exception as exc:                                  # noqa: BLE001
-        _debug(f"ERROR {type(exc).__name__}: {exc}")
+        if _locked(exc):
+            # 게임이 잠깐 쓰기 락을 쥔 순간과 겹쳤다 — 한 번만 더.
+            # 그래도 안 되면 이번 적립은 버리되, 흔적은 남긴다.
+            time.sleep(0.3)
+            try:
+                _run(payload)
+                _note("LOCKED -> retry ok")
+            except Exception as exc2:                         # noqa: BLE001
+                _note(f"LOCKED retry failed: {exc2}")
+        else:
+            _note(f"ERROR {type(exc).__name__}: {exc}")
+    took = time.monotonic() - t0
+    if took > 2.0:
+        # 훅이 이렇게 오래 걸리면 에이전트가 그만큼 멈춘 것이다.
+        _note(f"SLOW {took:.1f}s {payload.get('hook_event_name', '')}")
     return 0
 
 

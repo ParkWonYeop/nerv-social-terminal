@@ -13,6 +13,14 @@ import re
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.I)
 
+# 프롬프트 구획 헤더([기억] 같은)를 위조할 수 있는 문자들
+_BRACKETS = re.compile(r"[\[\]\r\n]+")
+
+
+def inline_text(text: str) -> str:
+    """프롬프트에 한 줄로 재삽입할 텍스트 정화 — 대괄호·개행 제거."""
+    return _BRACKETS.sub(" ", text or "").strip()
+
 # ── 과금 분류 ──────────────────────────────────────────────────────────
 #
 # 이 구분이 안전장치의 전부다. 헷갈리면 안 된다.
@@ -208,11 +216,16 @@ def normalize(obj, *, clamp=3):
         "trust_delta": axis("trust_delta"),
         "interest_delta": axis("interest_delta"),
         "patience_delta": axis("patience_delta"),
-        "mood": s("mood"),
-        "impression": s("impression"),
-        "doubts": s("doubts"),
+        # mood·impression·doubts·memory 는 상태로 저장돼 이후 모든
+        # 턴의 시스템 프롬프트에 다시 실린다. 대괄호·개행을 지워 프롬프트
+        # 구획을 위조하는 자기강화 인젝션을 여기 한 곳에서 막는다 —
+        # 모든 응답이 이 함수를 지나므로 호출자마다 검사할 필요가 없다.
+        # 화면 표시용(line·narration)은 연출을 위해 그대로 둔다.
+        "mood": inline_text(s("mood"))[:24],
+        "impression": inline_text(s("impression"))[:200],
+        "doubts": inline_text(s("doubts"))[:200],
         "inner": s("inner"),
-        "memory": s("memory"),
+        "memory": inline_text(s("memory"))[:120],
         "choices": [c.strip() for c in raw_choices
                     if isinstance(c, str) and c.strip()][:4],
     }

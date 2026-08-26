@@ -10,8 +10,21 @@ import random
 import uuid
 
 from . import (characters, clock, config, db, economy, llm, persona, recall,
-               scenes, settings, stance, ui, world)
+               settings, stance, ui, world)
 from .ui import view as V
+
+def catalog(items: dict, aff: int, *, locked: bool = False):
+    """선물(gifts)·데이트(dates) 공용 목록.
+
+    항목 튜플의 [1]=가격, [2]=최소 호감도. locked=False 는 열린 것을
+    가격순으로, True 는 잠긴 것을 필요 호감도순으로 준다.
+    """
+    if locked:
+        return [(k, v) for k, v in
+                sorted(items.items(), key=lambda x: x[1][2]) if aff < v[2]]
+    return [(k, v) for k, v in
+            sorted(items.items(), key=lambda x: x[1][1]) if aff >= v[2]]
+
 
 HINT = [
     V.Hint("/date", "데이트"), V.Hint("/gift", "선물"),
@@ -30,16 +43,22 @@ class Game:
         self.framed = False    # 하단 고정 프레임이 화면에 그려져 있는가
         self.sess = uuid.uuid4().hex[:12]      # 이번 접속 식별자
         self.typing = settings.get("typing_speed", 0.028)
-        recall.ensure(con)
         from . import work
         self.work = work
-        work.ensure(con)
         self.scan()
 
     def scan(self):
-        """트랜스크립트에서 새로 쌓인 작업 기록을 읽어들인다(증분)."""
+        """트랜스크립트에서 새로 쌓인 작업 기록을 읽어들인다(증분).
+
+        스캔은 즉시 커밋한다. 여기서 연 쓰기 트랜잭션을 다음 턴의
+        commit(LLM 호출 뒤)까지 들고 가면 그 사이 훅이 전부 락에 걸려
+        에이전트가 멈추고 적립이 유실된다. scan 은 턴 경계에서만 부른다
+        — 진행 중인 다른 변경과 섞여 커밋되는 일이 없게.
+        """
         try:
-            return self.work.scan(self.con)
+            n = self.work.scan(self.con)
+            self.con.commit()
+            return n
         except Exception:
             return 0
 
@@ -93,10 +112,17 @@ class Game:
             (db.PLAYER, self.char.id, self.sess)).fetchone()
         return (row["ts"] if row else ""), (prev["ts"] if prev else "")
 
-    def context(self, st, extra="", *, query="", with_convo=True, boring=""):
+    def context(self, st, extra="", *, query="", boring=""):
         con = self.con
         mems = [t for t, _ in recall.relevant(con, query, n=8)]
         last_talk, last_sess = self.last_seen()
+        # 과금(=외부 API) 프로바이더에는 근무 기록 원문(프롬프트·커밋
+        # 메시지)을 보내지 않는다 — 집계(도구/커밋 횟수)만 싣는다.
+        # 원문 전송은 privacy.send_work_text 로 옵트인. 구독 CLI·로컬
+        # 서버는 제한하지 않는다 — 그 세션 기록 자체가 그 계정/기계에서
+        # 나온 것이라 새로 새는 정보가 없다.
+        send_text = (not llm.is_billable()
+                     or bool(settings.get("privacy.send_work_text", False)))
         return persona.context_block(
             self.char,
             now_line=clock.now_line(),
@@ -110,13 +136,13 @@ class Game:
             today_tools=st.tools, today_commits=st.commits,
             days_since=economy.days_since_active(con),
             streak=st.streak, memories=mems,
-            work_today=self.work.digest(con),
-            work_past=self.work.past_days(con, 3),
+            work_today=self.work.digest(con) if send_text else "",
+            work_past=self.work.past_days(con, 3) if send_text else [],
             last_convo=recall.render(
                 recall.last_conversation(con, self.sess, 6), self.char.name),
             this_convo=recall.render(
                 recall.this_conversation(con, self.sess, 8),
-                self.char.name) if with_convo else "",
+                self.char.name),
             danger_note=extra or db.flag(con, "last_danger"),
         )
 
@@ -227,6 +253,11 @@ class Game:
         chilled = stance.decay_interest(self.con, days)
         broken = stance.settle_promises(self.con)
         db.bump(self.con, "met_count", 1)
+        # 게임 접속도 활동이다 — 없으면 매일 게임만 켜는 사람에게
+        # "N일 만에 왔다"는 거짓말과 방치 감점이 반복된다.
+        # settle_neglect 뒤여야 한다: 앞이면 방치 일수가 0으로 계산돼
+        # 감점 자체가 사라진다.
+        economy.touch_activity(self.con)
         self.con.commit()
         st = self.state()
         danger = db.flag(self.con, "last_danger")
@@ -275,8 +306,11 @@ class Game:
             self.page()
             ui.dim("무슨 말을 할까?")
             return
-        st = self.state()
+        # 스캔을 먼저 — state() 의 도구/커밋 수와 work digest 가 같은
+        # 시점을 보게. 반대면 한 프롬프트 안에서 "도구 0회"와 오늘 고친
+        # 파일 목록이 함께 실린다.
         self.scan()
+        st = self.state()
         boring = stance.check_boring(self.con, text)
         self.push("user", text)
         db.say(self.con, "user", text, "", self.sess)
@@ -302,7 +336,7 @@ class Game:
     # ── 선물 ───────────────────────────────────────────────────────────
     def gift_view(self, st) -> V.ShopView:
         rows = []
-        for k, (name, price, need, _, _) in scenes.gift_list(
+        for k, (name, price, need, _, _) in catalog(
                 self.char.gifts, st.affection):
             owned = self.con.execute(
                 "SELECT given FROM owned WHERE player=? AND char=? AND item=?",
@@ -313,8 +347,8 @@ class Game:
                 given=(owned["given"] if owned else 0)))
         locked = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
                             locked=True)
-                  for k, v in scenes.locked_gifts(self.char.gifts,
-                                                  st.affection)]
+                  for k, v in catalog(self.char.gifts, st.affection,
+                                      locked=True)]
         return V.ShopView(title="상점 — 선물", rows=rows, locked=locked,
                           money=st.money,
                           currency_symbol=st.currency_symbol,
@@ -392,11 +426,11 @@ class Game:
     def date_view(self, st) -> V.ShopView:
         rows = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
                           affordable=st.money >= v[1])
-                for k, v in scenes.date_list(self.char.dates, st.affection)]
+                for k, v in catalog(self.char.dates, st.affection)]
         locked = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
                             locked=True)
-                  for k, v in scenes.locked_dates(self.char.dates,
-                                                  st.affection)]
+                  for k, v in catalog(self.char.dates, st.affection,
+                                      locked=True)]
         return V.ShopView(title="갈 수 있는 곳", rows=rows, locked=locked,
                           money=st.money,
                           currency_symbol=st.currency_symbol,
@@ -485,9 +519,11 @@ class Game:
         self.redraw()
 
         # 2막: 판정
+        # line 은 모델이, action 은 사용자가 쓴 텍스트 — 대괄호·개행을
+        # 지워 [장소] 같은 구획 헤더를 위조하지 못하게 하고 넣는다.
         msg2 = (f"[장소] {name}\n{setting}\n\n"
-                f"[방금 {nm}가 한 말] {got['line']}\n"
-                f"[상대가 고른 행동] {action}\n\n"
+                f"[방금 {nm}가 한 말] {llm.inline_text(got['line'])}\n"
+                f"[상대가 고른 행동] {llm.inline_text(action)}\n\n"
                 f"이 행동에 대한 {nm}의 반응을 쓰라. 데이트의 마무리 장면이다.\n"
                 f"행동이 진심이고 {nm}를 향한 것이면 크게 마음이 움직인다(+4~+8). "
                 f"무난하면 +1~+3. 성의 없거나 {nm}를 도구 취급하면 음수(-5까지).")

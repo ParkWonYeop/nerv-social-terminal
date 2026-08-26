@@ -79,6 +79,9 @@ TRUST_DANGER = -12           # 위험 명령은 호감보다 신뢰를 더 깎�
 TRUST_COMMIT = 1             # 꾸준함이 신뢰를 만든다
 TRUST_BROKEN_PROMISE = -8    # 약속을 오래 안 지키면
 PROMISE_GRACE_DAYS = 5       # 이 날짜가 지나면 약속이 깨진 것으로 본다
+PROMISE_FORGET_DAYS = 14     # 감점 후 이만큼 더 지나면 약속을 잊는다.
+                             # 안 잊으면 [지키지 않은 약속] 블록이 모든
+                             # 프롬프트에 영구히 실린다(감점은 어차피 1회).
 
 INTEREST_DECAY_PER_DAY = -2  # 안 오면 관심이 식는다
 INTEREST_BORING = -4         # 같은 말 반복 / 내용 없는 말

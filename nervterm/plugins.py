@@ -62,11 +62,29 @@ def _parse_toml_mini(text: str) -> dict:
         if not m:
             continue
         key, val = m.group(1), m.group(2)
-        if "#" in val and not val.lstrip().startswith(('"', "'")):
-            val = val.split("#", 1)[0].strip()
+        val = _strip_inline_comment(val)
         target = out if cur is None else cur
         target[key] = _parse_toml_value(val)
     return out
+
+
+def _strip_inline_comment(val: str) -> str:
+    """따옴표 밖의 # 부터를 잘라낸다.
+
+    문서 예제(`world = "nerv"  # 주석`)를 그대로 따라 하면 3.9/3.10
+    (tomllib 없음)에서 값에 주석이 붙어 로드가 실패했다. 따옴표 안의
+    # (`color = "#ff0000"`)은 값이다 — 위치로 구분해야 한다.
+    """
+    quote = None
+    for i, ch in enumerate(val):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == "#":
+            return val[:i].rstrip()
+    return val
 
 
 def _parse_toml_value(val: str):
@@ -217,6 +235,7 @@ def search_paths():
 
 
 _registry = None
+PARSE_ERRORS = []   # [(폴더명, 사유)] — --plugins 와 설정 화면이 보여준다
 
 
 def discover(*, refresh: bool = False) -> dict:
@@ -225,6 +244,7 @@ def discover(*, refresh: bool = False) -> dict:
     if _registry is not None and not refresh:
         return _registry
     found = {}
+    errors = []
     for base, source in search_paths():
         if not base.is_dir():
             continue
@@ -235,11 +255,16 @@ def discover(*, refresh: bool = False) -> dict:
             try:
                 meta = read_manifest(manifest)
             except Exception as exc:                          # noqa: BLE001
+                # 조용히 사라지게 두지 않는다 — "깨진 플러그인도 사유가
+                # 뜬다"는 문서 약속. kind/id 를 모르는 상태라 레지스트리
+                # 대신 별도 목록에 담는다(정상 플러그인을 가리지 않게).
+                errors.append((child.name, f"plugin.toml: {exc}"))
                 continue
             plug = Plugin(path=child, meta=meta, source=source)
             plug.error = plug.check()
             found[(plug.kind, plug.id)] = plug          # 뒤가 앞을 덮는다
     _registry = found
+    PARSE_ERRORS[:] = errors
     return found
 
 

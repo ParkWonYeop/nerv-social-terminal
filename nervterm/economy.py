@@ -21,13 +21,15 @@ def apply(con, *, lcl=0, aff=0, kind="", reason="", session_id="",
 
     LCL 은 전역 지갑, 호감도(aff)는 char(기본: 활성 캐릭터)에게 간다.
     """
-    if lcl and respect_cap:
+    if lcl > 0 and respect_cap:
         row = db.daily_row(con)
         room = max(0, config.DAILY_LCL_CAP - (row["lcl"] or 0))
         lcl = min(lcl, room)
     if lcl:
         db.bump(con, "lcl", lcl, lo=0)
-        db.bump(con, "total_earned", lcl)
+        # 총 획득량은 의미상 절대 줄지 않는다 — 음수 lcl(벌금류)이
+        # 들어와도 지갑만 깎인다.
+        db.bump(con, "total_earned", max(0, lcl))
         db.daily_bump(con, "lcl", lcl)
     if aff:
         db.bump(con, "affection", aff, lo=config.AFF_MIN, hi=config.AFF_MAX,

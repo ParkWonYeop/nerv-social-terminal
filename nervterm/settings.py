@@ -252,6 +252,39 @@ def _migrate(raw: dict) -> dict:
     return raw
 
 
+def write_json_atomic(target, tree: dict, mode: int = None) -> None:
+    """임시 파일 + os.replace 원자적 JSON 쓰기.
+
+    설치기가 ~/.claude/settings.json 같은 남의(사용자의) 설정 파일을
+    덮을 때도 쓴다 — 중간에 죽어도 잘린 파일이 남지 않는다. 심볼릭
+    링크(dotfiles 관리)는 실제 파일 위치에 쓴다 — 링크를 실파일로
+    바꿔치기하지 않는다. mode 를 안 주면 기존 파일 권한을 보존한다.
+    """
+    import stat as _stat
+    p = Path(target)
+    if p.is_symlink():
+        p = p.resolve()
+    if mode is None:
+        try:
+            mode = _stat.S_IMODE(p.stat().st_mode)
+        except OSError:
+            mode = 0o600
+    p.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(tree, ensure_ascii=False, indent=2) + "\n"
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix="." + p.name + "-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.chmod(tmp, mode)
+        os.replace(tmp, p)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def save_user(tree: dict) -> None:
     """이 사용자의 설정만 원자적으로 저장한다.
 
@@ -260,21 +293,7 @@ def save_user(tree: dict) -> None:
     이미 한 번 설정을 만진 사람에게는 반영되지 않는다.
     """
     global _cache
-    p = path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    body = json.dumps(tree, ensure_ascii=False, indent=2) + "\n"
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".settings-")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(body)
-        os.chmod(tmp, 0o600)      # 남이 읽을 이유가 없다
-        os.replace(tmp, p)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    write_json_atomic(path(), tree, mode=0o600)   # 남이 읽을 이유가 없다
     _cache = None                 # 다음 load 에서 층을 다시 쌓는다
 
 

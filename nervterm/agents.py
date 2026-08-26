@@ -21,7 +21,9 @@ from pathlib import Path
 
 # 우리 훅인지 판별. 'rei' 와 'hook' 이 부분 문자열로 함께 있다는 것만으로
 # 판정하면 남의 훅(예: reindex-hook.sh)까지 지워 버린다.
-_OURS = re.compile(r"(?:^|[/\s])(?:eva|nervterm|rei)(?:\.py)?\s+hook(?:\s|$)")
+# 경로에 공백이 있으면 설치기가 shlex.quote 로 감싼다 — 닫는 따옴표 허용.
+_OURS = re.compile(
+    r"(?:^|[/\s])(?:eva|nervterm|rei)(?:\.py)?['\"]?\s+hook(?:\s|$)")
 
 
 def is_our_hook(entry) -> bool:
@@ -128,9 +130,11 @@ class ClaudeAgent(Agent):
     id = "claude"
     label = "Claude Code"
     install_hint = "python3 install-hooks.py"
-    events = ("PostToolUse", "PostToolUseFailure", "Stop",
-              "SessionStart", "SessionEnd")
-    tool_events = ("PostToolUse", "PostToolUseFailure")
+    # PostToolUseFailure 는 Claude Code 에 없는 이벤트라 등록하지 않는다.
+    # 실패 감지는 PostToolUse 페이로드의 tool_response.is_error 로 충분
+    # (hook.py). 기존 설치본의 잔존 등록은 재설치 시 걷어내진다.
+    events = ("PostToolUse", "Stop", "SessionStart", "SessionEnd")
+    tool_events = ("PostToolUse",)
 
     def hook_path(self) -> Path:
         return Path.home() / ".claude" / "settings.json"

@@ -781,7 +781,7 @@ def _():
 
 @check("뷰 모델 — 목록·기록 화면이 데이터만으로 만들어진다")
 def _():
-    from nervterm import characters, db, game, scenes, world
+    from nervterm import characters, db, game, world
     world.load(refresh=True)
     with db.session() as con:
         db.init(con)
@@ -789,7 +789,7 @@ def _():
         db.set_char(char.id)
         g = game.Game(con, char, offline=True, animate=False)
         st = g.state()
-        rows = scenes.gift_list(char.gifts, st.affection)
+        rows = game.catalog(char.gifts, st.affection)
         true(len(rows) > 0, "선물 목록이 비었다")
         for _, item in rows:
             eq(len(item), 5, "선물 튜플 모양")
@@ -907,6 +907,185 @@ def _():
     finally:
         settings.set_character_enabled("eva-characters", "asuka", True)
         characters.load(refresh=True)
+
+
+@check("plugin.toml 미니 파서 — 인라인 주석·따옴표 안 #·배열")
+def _():
+    from nervterm.plugins import _parse_toml_mini
+    got = _parse_toml_mini(
+        '[plugin]\n'
+        'id = "demo"        # 주석\n'
+        "name = '데모' # 또 주석\n"
+        'color = "#ff0000"\n'
+        'tags = [ "a#b", "c" ]\n'
+        'count = 3 # 숫자\n'
+        'flag = true\n'
+        '[character]\n'
+        'world = "nerv"      # 이 팩이 전제하는 세계관\n')
+    eq(got["plugin"]["id"], "demo", "따옴표 값 뒤 인라인 주석")
+    eq(got["plugin"]["name"], "데모", "싱글쿼트 뒤 주석")
+    eq(got["plugin"]["color"], "#ff0000", "따옴표 안 # 은 값")
+    eq(got["plugin"]["tags"], ["a#b", "c"], "배열 원소 안 #")
+    eq(got["plugin"]["count"], 3, "주석 딸린 정수")
+    eq(got["plugin"]["flag"], True, "불리언")
+    eq(got["character"]["world"], "nerv", "문서 예제 그대로")
+
+
+@check("plugin.toml 미니 파서 — tomllib 과 같은 결과 (동봉 플러그인 전부)")
+def _():
+    from nervterm import plugins
+    try:
+        import tomllib
+    except ImportError:
+        return                    # 3.9/3.10 — 비교 대상이 없다
+    for base, _src in plugins.search_paths():
+        if not base.is_dir():
+            continue
+        for mf in sorted(base.glob("*/plugin.toml")):
+            text = mf.read_text(encoding="utf-8")
+            eq(plugins._parse_toml_mini(text), tomllib.loads(text), str(mf))
+
+
+@check("깨진 plugin.toml — 사라지지 않고 사유가 남는다")
+def _():
+    import shutil
+    from nervterm import identity, plugins
+    broken = identity.data_dir() / "plugins" / "broken-pack"
+    broken.mkdir(parents=True, exist_ok=True)
+    # UTF-8 로 읽을 수 없는 바이트 — read_manifest 가 실제로 던지는 경로
+    (broken / "plugin.toml").write_bytes(b"[plugin]\nid = \xff\xfe")
+    try:
+        plugins.discover(refresh=True)
+        true(any(name == "broken-pack" for name, _ in plugins.PARSE_ERRORS),
+             "PARSE_ERRORS 에 없다")
+    finally:
+        shutil.rmtree(broken, ignore_errors=True)
+        plugins.discover(refresh=True)
+
+
+@check("경제 — 일일 상한 절단과 총획득 보호")
+def _():
+    from nervterm import config, db, economy
+    with db.session() as con:
+        db.init(con)
+        db.set_char("rei")
+        room = max(0, config.DAILY_LCL_CAP - (db.daily_row(con)["lcl"] or 0))
+        got, _ = economy.apply(con, lcl=config.DAILY_LCL_CAP * 2, kind="test")
+        eq(got, room, "일일 상한을 넘겨 적립됐다")
+        te = db.geti(con, "total_earned")
+        economy.apply(con, lcl=-5, kind="test", respect_cap=False)
+        eq(db.geti(con, "total_earned"), te, "음수 lcl 이 총획득을 깎았다")
+
+
+@check("방치 — 감점 상한, 중복 방지, 복귀 리셋")
+def _():
+    import datetime
+    from nervterm import config, db, economy
+    with db.session() as con:
+        db.init(con)
+        db.set_char("rei")
+        past = (datetime.datetime.now()
+                - datetime.timedelta(days=30)).isoformat(timespec="seconds")
+        db.put(con, "last_active", past)
+        days, pen = economy.settle_neglect(con)
+        true(days >= 29 and pen < 0, f"방치가 감점되지 않았다 ({days}, {pen})")
+        true(pen >= config.AFF_NEGLECT_CAP, "상한을 넘어 깎았다")
+        _, pen2 = economy.settle_neglect(con)
+        eq(pen2, 0, "같은 방치를 두 번 감점")
+        economy.touch_activity(con)
+        eq(economy.settle_neglect(con), (0, 0), "복귀 후에도 방치로 봤다")
+        eq(db.geti(con, "neglect_total"), 0, "복귀했는데 누적이 리셋 안 됨")
+
+
+@check("지루함 — 2글자 정상어는 통과, 성의 없는 것만 잡는다")
+def _():
+    from nervterm import db, stance
+    with db.session() as con:
+        db.init(con)
+        db.set_char("rei")
+        eq(stance.check_boring(con, "안녕"), "", "정상 인사를 처벌")
+        eq(stance.check_boring(con, "미안"), "", "정상 사과를 처벌")
+        true(stance.check_boring(con, "ㅇㅇ"), "성의 없는 답을 통과시켰다")
+        true(stance.check_boring(con, "ㅋ"), "1글자를 통과시켰다")
+
+
+@check("거절 — 인내가 없으면 거절한다")
+def _():
+    from nervterm import config, db, stance
+    with db.session() as con:
+        db.init(con)
+        db.set_char("rei")
+        keep = db.geti(con, "patience")
+        try:
+            db.put(con, "patience", 0)
+            true(stance.refuses(con, need=10, what="선물"),
+                 "인내 0 인데 받아줬다")
+            db.put(con, "patience", 80)
+            db.put(con, "trust", 50)
+            db.put(con, "interest", 50)
+            eq(stance.refuses(con, need=10, what="선물"), None,
+               "상태가 멀쩡한데 거절했다")
+        finally:
+            db.put(con, "patience", keep)
+
+
+@check("약속 — 감점은 1회, 기한이 지나면 잊는다")
+def _():
+    import datetime
+    from nervterm import config, db, stance
+    with db.session() as con:
+        db.init(con)
+        db.set_char("rei")
+        db.put(con, "trust", 60)
+
+        def add(text, days_ago):
+            ts = (datetime.datetime.now() - datetime.timedelta(days=days_ago)
+                  ).isoformat(timespec="seconds")
+            con.execute("INSERT INTO memory(player,char,ts,kind,text) "
+                        "VALUES(?,?,?,?,?)",
+                        (db.PLAYER, "rei", ts, "promise", text))
+
+        add("수족관에 같이 간다", config.PROMISE_GRACE_DAYS + 2)
+        add("옥상에 간다",
+            config.PROMISE_GRACE_DAYS + config.PROMISE_FORGET_DAYS + 1)
+        eq(stance.settle_promises(con), 2, "감점 건수")
+        eq(db.geti(con, "trust"), 60 + config.TRUST_BROKEN_PROMISE * 2)
+        eq(stance.settle_promises(con), 0, "같은 약속을 두 번 감점")
+        broken = stance.check_broken_promises(con)
+        eq([t for t, _ in broken], ["수족관에 같이 간다"],
+           "기한 지난 약속이 잊히지 않았다")
+
+
+@check("llm.ask — 가짜 프로바이더로 예산 차감·JSON 연결")
+def _():
+    from nervterm import db, llm
+
+    class Fake(llm.Provider):
+        id = "fake"
+        label = "fake"
+        billing = llm.BILLING_NONE
+
+        def __init__(self):
+            super().__init__({})
+
+        def available(self):
+            return True, ""
+
+        def complete(self, system, user, timeout=None):
+            return '{"line": "응.", "affection_delta": 99}'
+
+    orig = llm.current
+    llm.current = lambda: Fake()
+    try:
+        with db.session() as con:
+            db.init(con)
+            before = db.daily_row(con)["llm"] or 0
+            got = llm.ask(con, "sys", "user")
+            eq(got["line"], "응.", "응답 JSON 이 연결되지 않았다")
+            eq(db.daily_row(con)["llm"], before + 1, "호출 카운트")
+            eq(llm.normalize(got, clamp=3)["affection_delta"], 3, "클램프")
+    finally:
+        llm.current = orig
 
 
 # ═══════════════════════════════════════════════════════════════════════
