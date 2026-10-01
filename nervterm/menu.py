@@ -11,6 +11,7 @@
     "quit"      나간다
 """
 from . import (characters, db, llm, plugins, settings, term, ui, world)
+from .hangul import josa
 from .llm import guard
 from .ui import view as V
 
@@ -54,9 +55,9 @@ def open_settings(con) -> str:
                        note="바꾸면 다시 시작한다"),
             V.MenuItem("5", "세계관", value=w.name,
                        note=f"재화: {w.currency_name}"),
-            V.MenuItem("6", "재화를 적립할 에이전트",
+            V.MenuItem("6", "보상·근무 기록 대상",
                        value=", ".join(settings.enabled_agents()) or "없음",
-                       note="훅이 설치된 에이전트에서 작업량을 가져온다"),
+                       note="체크한 에이전트만 근무 기록을 보고 보상을 준다"),
             V.MenuItem("9", "초기화", tone="danger",
                        note="관계·기억·재화를 지운다"),
         ]
@@ -126,6 +127,7 @@ def _talk_settings(con) -> None:
     while True:
         anim = settings.get("animation", True)
         speed = settings.get("typing_speed", 0.028)
+        aware = settings.get("social.aware", True)
         env = settings.overridden_by_env("daily_llm_calls")
 
         items = [
@@ -140,6 +142,11 @@ def _talk_settings(con) -> None:
             lock(V.MenuItem("3", "타이핑 속도",
                             value=f"{speed:.3f}초/글자" if speed else "즉시",
                             note="0 이면 한 번에 출력"), "typing_speed"),
+            lock(V.MenuItem("4", "캐릭터 간 인지",
+                            value="켬" if aware else "끔",
+                            note=("같은 세계의 사람들은 누구와 어디에 갔고 무엇을 "
+                                  "줬는지 안다. 대화와 기억은 넘어가지 않는다")),
+                 "social.aware"),
         ]
         got = ui.menu(V.MenuView(title="설정 — 대화", items=items))
         if got in (None, "b"):
@@ -159,6 +166,8 @@ def _talk_settings(con) -> None:
                              max(0.0, min(0.2, float(raw or 0))))
             except (TypeError, ValueError):
                 pass
+        elif got == "4":
+            settings.put("social.aware", not aware)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -166,7 +175,6 @@ def _talk_settings(con) -> None:
 # ═══════════════════════════════════════════════════════════════════════
 def _llm_settings(con) -> None:
     while True:
-        cfg = settings.get("llm", {}) or {}
         prov = llm.current()
         ok, why = llm.probe(prov)
 
@@ -224,9 +232,7 @@ def _llm_settings(con) -> None:
         if got == "1":
             _pick_provider(con)
         elif got == "2":
-            raw = term.ask_line(f"  모델 (엔터면 기본값 "
-                                f"{prov.default_model or '자동'}) > ")
-            settings.put(f"llm.models.{prov.id}", (raw or "").strip())
+            _pick_model(con, prov)
         elif got == "3":
             raw = term.ask_line(f"  주소 (엔터면 {prov.default_base_url}) > ")
             settings.put(f"llm.base_urls.{prov.id}", (raw or "").strip())
@@ -287,13 +293,74 @@ def _pick_provider(con) -> None:
             ui.pause()
             return
 
-    settings.put("llm.provider", chosen.id)
-    # 모델·주소는 프로바이더별로 저장되므로 지울 필요가 없다.
-    # 옛 공용 키만 비워 둔다 — 그건 프로바이더가 바뀌면 뜻이 달라진다.
-    settings.put("llm.model", "")
-    settings.put("llm.base_url", "")
-    ui.notice(f"{chosen.label} 로 바꿨다.", "good")
+    # 유료면 방금 '동의' 를 받았다 — 시험 호출 요금도 그 안에 들어 있다
+    _switch(con, provider_id=chosen.id, agreed=probe.is_billable())
+
+
+def _pick_model(con, prov) -> None:
+    """모델을 목록에서 고른다. 목록은 그때그때 새로 받아온다."""
+    ui.blank()
+    ui.dim(f"{prov.label} — 모델 목록을 받아오는 중…")
+    try:
+        models = prov.catalog()
+    except Exception:                                         # noqa: BLE001
+        models = []
+    stored = ((settings.get("llm.models", {}) or {}).get(prov.id) or "")
+    default = prov.default_model or "자동"
+    items = [V.MenuItem(
+        "default", f"기본값 ({default})",
+        value="사용 중" if not stored else "",
+        note="프로바이더가 정한 기본 모델", payload="")]
+    for i, (mid, name, note) in enumerate(models, 1):
+        mark = "사용 중" if mid == stored else ""
+        items.append(V.MenuItem(
+            str(i), name, value=mark or (mid if name != mid else ""),
+            note=note or mid, payload=mid))
+    items.append(V.MenuItem(
+        "_typed", "직접 입력…", tone="warn", input_mode=True,
+        input_prompt="  모델 이름 > ", note="목록에 없는 이름을 쓴다"))
+    notes = [("plain", "고르면 연결 시험을 한다. 실패하면 바꾸지 않는다.")]
+    if not models:
+        hint = ("ollama pull exaone3.5:7.8b 로 받을 수 있다"
+                if prov.id in ("ollama", "codex-oss") else
+                "키·주소를 확인하거나 직접 입력한다")
+        notes.insert(0, ("warn", f"목록을 받아오지 못했다 — {hint}"))
+    got = ui.choose(V.MenuView(
+        title=f"모델 — {prov.label}", items=items, notes=notes,
+        subtitle=f"지금: {stored or default}", max_rows=14))
+    if got is None:
+        return
+    new = got.typed if got.input_mode else (got.payload or "")
+    if new == stored:
+        return
+    _switch(con, provider_id=prov.id, model=new)
+
+
+def _switch(con, *, provider_id, model=None, agreed=False) -> bool:
+    """프로바이더·모델을 바꾼다 — 연결 시험을 통과할 때만.
+
+    실패하면 아무것도 바꾸지 않는다. 고른 모델이 이 계정에서 안 되는데
+    그대로 저장되면, 캐릭터가 조용히 사전 작성 대사만 하게 된다.
+    """
+    cand = llm.candidate(provider_id, model)
+    target = f"{cand.label} · {cand.model or '기본 모델'}"
+    if cand.is_billable() and not agreed and not ui.confirm(
+            "연결 시험도 요금이 청구된다 (1회).", "동의"):
+        ui.notice("바꾸지 않았다.", "info")
+        ui.pause()
+        return False
+    ui.blank()
+    ui.notice(f"{target} — 연결 시험 중…", "info")
+    with ui.thinking("단말"):
+        ok, detail = llm.switch(con, provider_id=provider_id, model=model)
+    if not ok:
+        ui.notice("연결 시험 실패 — 바꾸지 않았다.", "danger")
+        ui.dim(f"사유: {detail}")
+        ui.pause()
+        return False
+    ui.notice(f"{target} 로 바꿨다.  「{detail}」", "good")
     ui.pause()
+    return True
 
 
 def _toggle_guard() -> None:
@@ -324,25 +391,21 @@ def _toggle_guard() -> None:
 
 def _test_connection(con) -> None:
     prov = llm.current()
-    ok, why = llm.probe(prov)
     ui.blank()
-    if not ok:
-        ui.notice(f"부를 수 없다 — {why}", "danger")
-        ui.pause()
-        return
     if prov.is_billable():
         ui.notice("시험 호출도 요금이 청구된다.", "danger")
         if not ui.confirm("한 번 부른다.", "동의"):
             return
-    ui.notice(f"{prov.label} 에 한 턴 물어본다…", "info")
-    got = llm.ask(con, "너는 시험용 응답기다. 반드시 JSON 하나만 낸다.",
-                  '{"line":"들린다","emotion":"neutral"} 형식으로 답하라.')
+    ui.notice(f"{prov.label} · {prov.model or '기본 모델'} 에 한 턴 물어본다…",
+              "info")
+    with ui.thinking("단말"):
+        ok, detail = llm.check(con, prov)
     ui.blank()
-    if got:
-        ui.notice("응답이 왔다.", "good")
-        ui.dim(str(got)[:200])
+    if ok:
+        ui.notice(f"응답이 왔다.  「{detail}」", "good")
     else:
         ui.notice("응답이 없다. 사전 작성 대사로 돌게 된다.", "danger")
+        ui.dim(f"사유: {detail}")
     ui.pause()
 
 
@@ -474,6 +537,13 @@ def _world_settings(con) -> None:
 #  6. 에이전트
 # ═══════════════════════════════════════════════════════════════════════
 def _agent_settings(con) -> None:
+    """보상·근무 기록 대상 — 여러 개를 체크할 수 있다.
+
+    체크한 에이전트: 세션 기록을 읽어 캐릭터가 알고, 거기서 한 작업이
+    재화가 된다. 체크를 푼 에이전트: 둘 다 안 한다. 훅은 지우지 않는다 —
+    훅이 스스로 설정을 보고 아무것도 안 하고 끝난다. 다시 체크하면 바로
+    돌아온다.
+    """
     from .agents import AGENTS
 
     while True:
@@ -482,24 +552,75 @@ def _agent_settings(con) -> None:
         for i, agent in enumerate(AGENTS, 1):
             on = bool(table.get(agent.id))
             installed = agent.hook_installed()
-            items.append(V.MenuItem(
-                str(i), agent.label,
-                value="켬" if on else "끔",
-                note=("훅 설치됨" if installed else
-                      f"훅이 없다 — {agent.install_hint}"),
-                tone="plain" if installed or not on else "warn",
-                payload=agent.id))
+            if not agent.needs_hook:
+                value = "git 커밋"
+                note = ("작업 폴더의 새 커밋이 재화가 된다 · Ollama 대화를 읽는다"
+                        if on else "읽지 않고, 적립하지 않는다")
+            elif on and not installed:
+                value = "훅 없음"
+                note = f"체크했지만 훅이 없다 — 고르면 설치한다 ({agent.install_hint})"
+            else:
+                value = "훅 있음" if installed else "훅 없음"
+                note = ("근무 기록을 읽고, 작업이 재화가 된다" if on
+                        else "읽지 않고, 적립하지 않는다")
+            items.append(lock(V.MenuItem(
+                str(i), f"{'[✓]' if on else '[ ]'} {agent.label}",
+                value=value, note=note,
+                tone="warn" if on and agent.needs_hook and not installed else
+                     ("plain" if on else "dim"),
+                payload=agent), "agents"))
+        if table.get("local"):
+            roots = ", ".join(settings.get("local.roots") or ["~"])
+            items.append(lock(V.MenuItem(
+                "r", "로컬 — 작업 폴더", value=roots,
+                note="이 폴더들 아래(3단계까지)의 git 저장소를 지켜본다",
+                payload="roots"), "local.roots"))
 
         got = ui.menu(V.MenuView(
-            title="설정 — 재화를 적립할 에이전트", items=items,
-            subtitle="훅이 설치된 에이전트의 작업량이 재화가 된다.",
-            notes=[("plain", "여기서 켜는 것은 '세션 기록을 읽을 대상' 이다."),
-                   ("plain", "훅 설치는 install-hooks.py 가 한다.")]))
+            title="설정 — 보상·근무 기록 대상", items=items,
+            subtitle="체크한 에이전트만 근무 기록을 보고 보상을 준다.",
+            notes=[("plain", "체크를 풀면 거기서 한 작업은 적립되지 않고, "
+                             "캐릭터도 모른다."),
+                   ("plain", "고르면 체크가 바뀐다. 여러 개를 함께 체크할 수 있다.")]))
         if got in (None, "b", "quit"):
             return
-        target = next((it.payload for it in items if it.key == got), None)
-        if target:
-            settings.put(f"agents.{target}", not bool(table.get(target)))
+        agent = next((it.payload for it in items if it.key == got), None)
+        if agent is None:
+            continue
+        if agent == "roots":
+            raw = term.ask_line("  작업 폴더 (쉼표로 여럿, 예: ~/projects, ~/work) > ")
+            dirs = [d.strip() for d in (raw or "").split(",") if d.strip()]
+            if dirs:
+                settings.put("local.roots", dirs)
+                db.put(con, "local_repos_at", "")     # 다음 정산 때 다시 찾는다
+            continue
+        on = not bool(table.get(agent.id))
+        settings.put(f"agents.{agent.id}", on)
+        if agent.id == "local" and on:
+            # 켠 순간부터 센다 — 지난 커밋을 한꺼번에 적립하지 않는다
+            db.put(con, "local_since", "")
+        if on and agent.needs_hook and not agent.hook_installed():
+            _install_hook(agent)
+
+
+def _install_hook(agent) -> None:
+    """훅이 없는 에이전트를 체크했다 — 그 자리에서 설치한다."""
+    import subprocess
+    import sys
+    from .config import ROOT
+    ui.blank()
+    ui.notice(f"{agent.label} 에 훅이 없다. 지금 설치한다.", "info")
+    ui.dim("기존 훅은 그대로 두고 옆에 붙는다. 설정 파일은 자동으로 백업된다.")
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "install-hooks.py"), "--agent", agent.id],
+        capture_output=True, text=True)
+    for line in (proc.stdout or "").splitlines()[-6:]:
+        ui.dim(line)
+    if proc.returncode == 0 and agent.hook_installed():
+        ui.notice("설치했다. 그 에이전트의 새 세션부터 적립된다.", "good")
+    else:
+        ui.notice(f"설치하지 못했다 — 직접 실행: {agent.install_hint}", "danger")
+    ui.pause()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -571,8 +692,9 @@ def _reset_one_character(con) -> None:
     if not cid:
         return
     char = characters.get(cid)
-    if ui.confirm(f"{char.full} 와의 관계·기억·선물 기록을 전부 지운다.",
-                  char.name):
+    if ui.confirm(f"{josa(char.full, '과/와')}의 관계·기억·선물 기록을 "
+                  "전부 지운다.", char.name):
         db.reset_character(con, cid)
-        ui.notice(f"{char.full} 와는 처음 만나는 사이가 됐다.", "good")
+        ui.notice(f"{josa(char.full, '과/와')}는 처음 만나는 사이가 됐다.",
+                  "good")
     ui.pause()

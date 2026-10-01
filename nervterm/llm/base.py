@@ -21,6 +21,20 @@ def inline_text(text: str) -> str:
     """프롬프트에 한 줄로 재삽입할 텍스트 정화 — 대괄호·개행 제거."""
     return _BRACKETS.sub(" ", text or "").strip()
 
+
+def flatten(system) -> str:
+    """시스템 프롬프트를 한 덩어리로.
+
+    persona.system_prompt() 는 [고정부, 가변부] 두 조각을 준다. 고정부
+    (페르소나·세계·출력 규칙)는 턴마다 같고 가변부(시각·상태·기억)만
+    바뀐다. 프롬프트 캐시를 직접 다루는 프로바이더(Anthropic API)는
+    조각을 그대로 쓰고, 나머지는 이걸로 이어 붙인다 — 고정부가 앞에
+    오므로 접두사 캐시(Claude Code 등)도 그대로 맞는다.
+    """
+    if isinstance(system, (list, tuple)):
+        return "\n\n".join(str(part) for part in system if part)
+    return system or ""
+
 # ── 과금 분류 ──────────────────────────────────────────────────────────
 #
 # 이 구분이 안전장치의 전부다. 헷갈리면 안 된다.
@@ -62,6 +76,12 @@ class Provider:
 
     def __init__(self, cfg: dict):
         self.cfg = cfg or {}
+        # 이번 complete() 에서 실제로 나간 요청 수. 재시도하면 2 가 된다 —
+        # 유료 프로바이더의 상한은 이걸로 센다(돈은 요청마다 나간다).
+        self.calls = 0
+        # 마지막 실패 사유. 연결 시험이 화면에 보여준다 — "응답이 없다" 만
+        # 보여 주면 모델 이름이 틀렸는지 로그인이 풀렸는지 알 수 없다.
+        self.last_error = ""
 
     # ── 설정 읽기 ──────────────────────────────────────────────────────
     #
@@ -109,9 +129,24 @@ class Provider:
         """지금 쓸 수 있는가. (가능한가, 안 되는 이유)"""
         return True, ""
 
-    def complete(self, system: str, user: str, *, timeout: int = None):
-        """모델 응답 원문. 실패하면 None — 호출부가 폴백 대사를 쓴다."""
+    def complete(self, system, user: str, *, timeout: int = None,
+                 schema: dict = None):
+        """모델 응답 원문. 실패하면 None — 호출부가 폴백 대사를 쓴다.
+
+        system  문자열, 또는 [고정부, 가변부] (flatten() 참조)
+        schema  응답 JSON 스키마. 강제할 수 있는 프로바이더는 문법
+                수준에서 강제한다. None 이면 캐릭터 응답(RESPONSE_SCHEMA).
+        """
         raise NotImplementedError
+
+    def catalog(self):
+        """고를 수 있는 모델. [(id, 이름, 설명)] — 부를 때마다 새로 받아온다.
+
+        설정 화면이 목록으로 띄운다. 받아올 수 없으면 [] (직접 입력으로).
+        목록에 있다고 이 계정에서 쓸 수 있다는 보장은 없다 — 고르면 연결
+        시험을 하고, 실패하면 바꾸지 않는다(llm.check).
+        """
+        return []
 
     # ── 실제 과금 여부 ─────────────────────────────────────────────────
     def is_billable(self) -> bool:
@@ -196,18 +231,29 @@ def normalize(obj, *, clamp=3):
                    "annoyed", "distant"}:
         emo = "neutral"
 
+    from .. import config
+
     def axis(key):
+        """신뢰·관심·인내 — 오를 때는 좁게, 내릴 때는 넓게.
+
+        예전에는 셋 다 ±8 그대로였다. 호감을 1 로 묶어 둔 반복 선물 세 번에
+        신뢰가 10 → 34 가 됐다. clamp 0(수치를 움직이지 않을 턴)이면 오르는
+        쪽은 0 이다.
+        """
         try:
             v = int(obj.get(key, 0) or 0)
         except (TypeError, ValueError):
             return 0
-        return max(-8, min(8, v))
+        name = key.replace("_delta", "")
+        up = 0 if clamp <= 0 else config.AXIS_UP_MAX.get(name, 2)
+        return max(-config.AXIS_DOWN_MAX, min(up, v))
 
     # 모델이 choices 를 null·문자열 등으로 잘못 내도 죽지 않는다
     raw_choices = obj.get("choices")
     if not isinstance(raw_choices, list):
         raw_choices = []
 
+    kept = s("kept_promise").lstrip("#")
     return {
         "narration": s("narration"),
         "line": s("line") or "…",
@@ -228,6 +274,12 @@ def normalize(obj, *, clamp=3):
         "memory": inline_text(s("memory"))[:120],
         "choices": [c.strip() for c in raw_choices
                     if isinstance(c, str) and c.strip()][:4],
+        # 이번 턴에 맺은 약속과 그 이행 대상. 기억으로 저장돼 이후
+        # 프롬프트에 실리므로 정화한다.
+        "promise": inline_text(s("promise"))[:120],
+        "promise_target": inline_text(s("promise_target"))[:40].lower(),
+        # 상대가 이번에 지켰다고 판단한 약속 번호
+        "kept_promise": kept if kept.isdigit() else "",
     }
 
 
@@ -255,6 +307,9 @@ _PROPERTIES = {
     "impression": {"type": "string"},
     "doubts": {"type": "string"},
     "choices": {"type": "array", "items": {"type": "string"}},
+    "promise": {"type": "string"},
+    "promise_target": {"type": "string"},
+    "kept_promise": {"type": "string"},
 }
 
 # OpenAI 계열의 구조화 출력은 `required` 에 **모든** 키가 있어야 하고
@@ -268,6 +323,32 @@ RESPONSE_SCHEMA = {
     "type": "object",
     "properties": _PROPERTIES,
     "required": list(_PROPERTIES),
+    "additionalProperties": False,
+}
+
+# 기억 압축(recall.consolidate) 전용. 캐릭터 응답 스키마로 압축을
+# 부르면 스키마를 강제하는 프로바이더(ollama·codex·OpenAI)는 facts 를
+# 낼 수가 없다 — 실제로 그렇게 압축이 조용히 실패하고 그 구간 대화가
+# 영영 기억이 되지 못했다.
+FACTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "facts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "kind": {"type": "string",
+                             "enum": ["promise", "fact", "event"]},
+                    "target": {"type": "string"},
+                },
+                "required": ["text", "kind", "target"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["facts"],
     "additionalProperties": False,
 }
 

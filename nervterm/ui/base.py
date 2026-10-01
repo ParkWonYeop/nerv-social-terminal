@@ -19,6 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .. import term
+from ..hangul import josa
 from . import view as V
 
 console = term.console
@@ -131,7 +132,7 @@ class BaseUI:
         """캐릭터가 응답을 만드는 동안. 미리 타이핑해도 안 깨지게 에코를 끈다."""
         who = name or self.name or "상대"
         with term.echo_off():
-            with console.status(Text(f"{who}가 대답을 생각한다…",
+            with console.status(Text(f"{josa(who, '이/가')} 대답을 생각한다…",
                                      style=self.dim_color),
                                 spinner="dots", spinner_style=self.dim_color):
                 yield
@@ -195,13 +196,15 @@ class BaseUI:
         items = []
         for row in sv.rows:
             mark = f"  (준 적 있음 ×{row.given})" if row.given else ""
+            reason = getattr(row, "reason", "")
             items.append(V.MenuItem(
                 key=row.key, label=row.name + mark,
                 value=f"{sv.currency_symbol} {row.price}",
-                tone="plain" if row.affordable else "dim",
-                disabled=not row.affordable,
-                disabled_reason=f"{sv.currency_symbol} {row.price} 필요 — "
-                                f"보유 {sv.currency_symbol} {sv.money}",
+                tone="plain" if row.affordable and not reason else "dim",
+                disabled=bool(reason) or not row.affordable,
+                disabled_reason=reason or (
+                    f"{sv.currency_symbol} {row.price} 필요 — "
+                    f"보유 {sv.currency_symbol} {sv.money}"),
                 note=f"이름: {row.key}",
                 payload=row))
         for row in sv.locked:
@@ -447,7 +450,7 @@ class BaseUI:
         self.blank()
         self.notice(f"상대 — {sv.player}")
         self.blank()
-        self.notice(f"{sv.char_name}가 이 사람을 어떻게 여기는가")
+        self.notice(f"{josa(sv.char_name, '이/가')} 이 사람을 어떻게 여기는가")
         for axis in sv.axes:
             good = axis.value >= axis.warn_below
             console.print(
@@ -465,6 +468,19 @@ class BaseUI:
         if sv.doubts:
             console.print(Text("    걸리는 것    ", style=self.dim_color) +
                           Text(f"「{sv.doubts}」", style=self.color("danger")))
+        if sv.open_promises:
+            self.blank()
+            self.notice("지키는 중인 약속")
+            for text, how, days in sv.open_promises[:5]:
+                when = "오늘" if not days else f"{days}일 전"
+                console.print(Text(f"    {text}  ", style="white") +
+                              Text(f"({when}" + (f" · {how}" if how else "")
+                                   + ")", style=self.dim_color))
+        if sv.kept_promises:
+            self.blank()
+            self.notice("지킨 약속", "good")
+            for text in sv.kept_promises[:3]:
+                console.print(Text(f"    {text}", style=self.color("good")))
         if sv.broken_promises:
             self.blank()
             self.notice("지키지 않은 약속", "danger")
@@ -472,6 +488,11 @@ class BaseUI:
                 console.print(Text(f"    {text}  ", style="white") +
                               Text(f"({days}일 지났다)",
                                    style=self.color("danger")))
+        if sv.care:
+            self.blank()
+            self.notice("챙겨 주는 중")
+            for line in sv.care:
+                console.print(Text(f"    {line}", style=self.main))
         self.blank()
         self.notice("근무 기록")
         for d in sv.work_days:
@@ -501,7 +522,7 @@ class BaseUI:
 
     def memory(self, mv: V.MemoryView) -> None:
         self.blank()
-        self.notice(f"{mv.char_name}가 기억하는 것")
+        self.notice(f"{josa(mv.char_name, '이/가')} 기억하는 것")
         if not mv.rows:
             self.dim("아직 아무것도.")
         for m in mv.rows:
@@ -517,12 +538,17 @@ class BaseUI:
 
     def worklog(self, wv: V.WorklogView) -> None:
         self.blank()
-        self.notice(f"{wv.char_name}가 단말로 보고 있는 것 — 오늘")
+        self.notice(f"{josa(wv.char_name, '이/가')} 단말로 보고 있는 것 — 오늘")
         if wv.today:
             for line in wv.today:
                 console.print(Text("  " + line, style="white"))
         else:
             self.dim("오늘은 아직 아무 기록도 없다.")
+        if wv.events:
+            self.blank()
+            self.notice("눈에 띄는 일")
+            for line in wv.events:
+                console.print(Text("    " + line, style=self.main))
         if wv.past:
             self.blank()
             self.notice("지난 며칠")

@@ -18,6 +18,8 @@ if ! command -v python3 >/dev/null 2>&1; then
     echo "python3 가 필요하다." >&2
     exit 1
 fi
+
+PY=python3
 # rich 검사는 게임 경로에서만. 훅(hook)·위젯(line)은 rich 를 안 쓰는데,
 # 이 검사 하나가 파이썬 인터프리터를 통째로 한 번 더 띄운다 —
 # 도구 호출마다 띄는 훅에 그 비용을 붙일 이유가 없다.
@@ -25,8 +27,16 @@ case "${1:-}" in
     hook|line) ;;
     *)
         if ! python3 -c "import rich" 2>/dev/null; then
-            echo "rich 모듈이 필요하다:  python3 -m pip install --user rich" >&2
-            exit 1
+            # 시스템 파이썬에 pip 를 못 쓰는 환경(PEP 668 — Homebrew 등)이면
+            # install.sh 가 저장소 폴더에 전용 가상환경을 만들어 둔다.
+            data="${NERV_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/nerv-social-terminal}"
+            if [ -x "$data/venv/bin/python3" ] \
+                    && "$data/venv/bin/python3" -c "import rich" 2>/dev/null; then
+                PY="$data/venv/bin/python3"
+            else
+                echo "rich 모듈이 필요하다 — $root/install.sh 를 실행하면 알아서 설치한다." >&2
+                exit 1
+            fi
         fi
         ;;
 esac
@@ -35,4 +45,4 @@ cd "$root" || exit 1
 # 저장소가 공용 위치(/opt/rei)에 있을 수 있다. 바이트코드 캐시는
 # 각자의 홈에 쓴다 — 남의 디렉터리에 쓰려다 실패하지 않도록.
 export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rei/pycache"
-exec python3 -m nervterm "$@"
+exec "$PY" -m nervterm "$@"

@@ -12,6 +12,7 @@ sqlite 에서 필요한 값만 한 번에 읽는다.
 세계관·캐릭터의 표시 이름은 DB 에 캐시해 둔 것을 쓴다. 게임이 켜질 때
 넣어 두므로, 한 번도 안 켰으면 위젯도 조용히 아무것도 안 그린다.
 """
+import json
 import os
 import sqlite3
 import sys
@@ -33,6 +34,9 @@ def _rgb(hex_color: str) -> str:
 
 
 def _data_dir():
+    # identity.data_dir() 와 같은 규칙이다 — 그쪽을 임포트하지 않으려고
+    # 일부러 베꼈다(속도). 저장소 위치 규칙을 바꾸면 둘 다 바꾼다.
+    # 옛 폴더(rei)를 새 이름으로 옮기는 일은 게임·훅이 한다.
     override = os.environ.get("NERV_DATA") or os.environ.get("REI_DATA")
     if override:
         return os.path.expanduser(override)
@@ -44,15 +48,19 @@ def _data_dir():
 
 
 def _player():
+    # identity.player() 와 같은 규칙 — 실행 계정(uid)이 먼저다.
+    # (os.getlogin() 은 데몬 아래에서 'root' 를 돌려준다.)
     if os.environ.get("REI_PLAYER"):
         return os.environ["REI_PLAYER"].strip()[:64]
+    uid = os.getuid()
+    if uid == 0 and os.environ.get("SUDO_USER"):
+        return os.environ["SUDO_USER"].strip()[:64]
     try:
-        name = os.getlogin()
-        if name:
-            return name[:64]
-    except OSError:
+        import pwd
+        return pwd.getpwuid(uid).pw_name[:64]
+    except (KeyError, OSError, ImportError):
         pass
-    for key in ("SUDO_USER", "LOGNAME", "USER", "USERNAME"):
+    for key in ("LOGNAME", "USER", "USERNAME"):
         v = os.environ.get(key)
         if v:
             return v.strip()[:64]
@@ -77,9 +85,26 @@ def read(con, player, char):
             return default
 
     last = con.execute(
-        "SELECT text,emotion FROM dialogue WHERE player=? AND char=? "
+        "SELECT text,emotion,ts FROM dialogue WHERE player=? AND char=? "
         "AND role='rei' ORDER BY id DESC LIMIT 1", (player, char)).fetchone()
     return rows, num, last
+
+
+def stage_of(raw_stages: str, aff: int, cached: str = "") -> str:
+    """호감도 → 단계 이름. 게임이 적어 둔 단계표로 그 자리에서 계산한다.
+
+    단계 '이름' 을 캐시해 두면 게임을 끈 뒤 훅이 호감을 바꿔도 옛
+    단계가 계속 떴다.
+    """
+    try:
+        table = json.loads(raw_stages) if raw_stages else []
+    except ValueError:
+        table = []
+    name = cached
+    for lo, label in table:
+        if aff >= lo:
+            name = label
+    return name
 
 
 def render(payload=None):
@@ -112,9 +137,10 @@ def render(payload=None):
     color = _rgb(rows.get("widget_color") or "#9ec5e0")
     cur = rows.get("widget_currency") or "LCL"
     sym = rows.get("widget_symbol") or "¤"
-    stage = rows.get("widget_stage") or ""
 
     aff = num("affection")
+    stage = stage_of(rows.get("widget_stages", ""), aff,
+                     rows.get("widget_stage") or "")
     out = []
     line1 = (
         f"{color}{name}{RESET}  {_gauge(aff, 10, color)} {WHITE}{aff:>3}{RESET}"
@@ -126,8 +152,17 @@ def render(payload=None):
     )
     out.append(line1)
 
-    if last and last[0]:
-        text = last[0].replace("\n", " ").strip()
+    # 대화보다 새로운 한 마디(훅이 남긴 것)가 있으면 그걸 보여 준다.
+    # 커밋하고, 실패하고, 세션을 마칠 때 — 단말을 보고 있다는 증거다.
+    text, quip = "", rows.get("widget_quip") or ""
+    quip_ts = rows.get("widget_quip_ts") or ""
+    # 같은 초면 한 마디 쪽 — 훅은 대화가 끝난 뒤에 돈다.
+    if quip and (not last or quip_ts >= (last[2] or "")):
+        text = quip
+    elif last and last[0]:
+        text = last[0]
+    if text:
+        text = text.replace("\n", " ").strip()
         if len(text) > 58:
             text = text[:57] + "…"
         out.append(f"{color}「{text}」{RESET}")
@@ -141,18 +176,65 @@ def render(payload=None):
 # 이름·색·단계·재화 이름 — 을 게임이 돌 때 DB 에 적어 둔다.
 # 위젯은 그걸 그대로 읽어 쓴다.
 def remember(con, char, world, stage: str) -> None:
-    """지금 누구를 만나고 있는지, 어떻게 표시할지 적어 둔다."""
+    """지금 누구를 만나고 있는지, 어떻게 표시할지 적어 둔다.
+
+    단계표와 한 마디 묶음(quips)도 함께 — 위젯과 훅은 플러그인을 읽지
+    않으므로 여기 적어 둔 것이 전부다.
+    """
     from . import db
     theme = getattr(char, "theme", None) or {}
     db.put(con, "widget_char", char.id, char="")
+    stages = [[lo, label] for lo, label, _ in (char.stages or [])]
     for key, value in (
         ("widget_name", char.name),
         ("widget_color", theme.get("main", "")),
         ("widget_stage", stage),
+        ("widget_stages", json.dumps(stages, ensure_ascii=False)),
+        ("widget_quips", json.dumps(getattr(char, "quips", None) or {},
+                                    ensure_ascii=False)),
         ("widget_currency", world.currency_name),
         ("widget_symbol", world.currency_symbol),
     ):
         db.put(con, key, value, char=char.id)
+
+
+# 같은 종류의 일이 연달아 일어나도 상태줄이 계속 바뀌면 시끄럽다.
+QUIP_GAP_SECONDS = 90
+
+
+def quip(con, kind: str, *, force: bool = False) -> str:
+    """훅이 부른다 — 방금 일어난 일에 대한 한 마디를 상태줄에 건다.
+
+    게임이 적어 둔 묶음에서 고른다. LLM 을 부르지 않는다(훅 지연 예산).
+    마지막으로 만난 상대가 없거나 그 사람의 묶음에 이 종류가 없으면
+    아무것도 안 한다.
+    """
+    import datetime as _dt
+    import random
+    from . import db
+    char = db.get(con, "widget_char", char="")
+    if not char:
+        return ""
+    try:
+        pool = json.loads(db.get(con, "widget_quips", char=char) or "{}")
+    except ValueError:
+        return ""
+    lines = pool.get(kind) if isinstance(pool, dict) else None
+    if not lines:
+        return ""
+    last = db.get(con, "widget_quip_ts", char=char)
+    if last and not force:
+        try:
+            gap = (_dt.datetime.now()
+                   - _dt.datetime.fromisoformat(last)).total_seconds()
+        except ValueError:
+            gap = QUIP_GAP_SECONDS
+        if gap < QUIP_GAP_SECONDS:
+            return ""
+    line = str(random.choice(lines))
+    db.put(con, "widget_quip", line, char=char)
+    db.put(con, "widget_quip_ts", db.now(), char=char)
+    return line
 
 
 def main() -> int:

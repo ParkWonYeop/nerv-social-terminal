@@ -36,11 +36,20 @@ from nervterm.settings import write_json_atomic               # noqa: E402
 # 훅 command 는 셸로 실행된다 — 경로에 공백이 있으면 인용 없이는
 # 설치가 성공한 것처럼 보이고 훅만 조용히 안 돈다.
 CMD = shlex.quote(str(ROOT / "eva")) + " hook"
+
+
+def command_for(agent) -> str:
+    """에이전트 이름을 끝에 붙인다 — 훅이 누가 불렀는지 알고, 설정에서
+    체크를 푼 에이전트의 작업은 적립하지 않게."""
+    return f"{CMD} {agent.id}"
 MANAGED = Path("/etc/claude-code/managed-settings.json")
 
 # 앵커 필수 — 없으면 mcp__foo__Read 같은 MCP 도구 이름에도 걸린다.
-TOOL_MATCHER = ("^(Bash|Edit|Write|NotebookEdit|Read|Grep|Glob|WebFetch|"
-                "WebSearch|Agent|Task|TaskCreate|TaskUpdate|Skill|TodoWrite)$")
+# apply_patch 는 Codex 의 파일 수정이다(Codex 는 Edit/Write 를 별칭으로도
+# 받지만, 정식 이름을 적어 두는 게 확실하다).
+TOOL_MATCHER = ("^(Bash|Edit|Write|NotebookEdit|apply_patch|Read|Grep|Glob|"
+                "WebFetch|WebSearch|Agent|Task|TaskCreate|TaskUpdate|Skill|"
+                "TodoWrite)$")
 
 
 def wanted_for(agent):
@@ -85,7 +94,7 @@ def merge(cfg: dict, agent, *, remove=False):
             cfg.pop("hooks", None)
         return changed
     for event, matcher in wanted_for(agent).items():
-        entry = {"hooks": [{"type": "command", "command": CMD,
+        entry = {"hooks": [{"type": "command", "command": command_for(agent),
                             "timeout": agent.hook_timeout(event)}]}
         if matcher:
             entry["matcher"] = matcher

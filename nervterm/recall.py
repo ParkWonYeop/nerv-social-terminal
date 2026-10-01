@@ -56,18 +56,30 @@ def _age_days(ts: str) -> float:
 
 
 # ── 쓰기 ───────────────────────────────────────────────────────────────
-def remember(con, kind: str, text: str, weight: int = 1, char=None) -> bool:
-    """기억을 남긴다. 이미 비슷한 게 있으면 중요도만 올린다."""
+def remember(con, kind: str, text: str, weight: int = 1, char=None,
+             target: str = "") -> int:
+    """기억을 남긴다. 새로 만들었으면 그 id, 이미 비슷한 게 있어 중요도만
+    올렸으면 0 (참/거짓으로 써도 예전과 같다).
+
+    target 은 약속의 이행 대상(date:roof 등). 비슷한 약속이 이미 있고
+    대상이 비어 있으면 채워 준다. 끝난 약속(지켰거나 어긴 것)과는 합치지
+    않는다 — 같은 말로 다시 한 약속은 새 약속이다.
+    """
     text = re.sub(r"\s+", " ", (text or "")).strip()
     if len(text) < 4:
-        return False
+        return 0
     g, gw = seq_grams(text), grams(text)
     if not g:
-        return False
+        return 0
     c = char if char is not None else db.CHAR
+    from . import config
     for r in con.execute(
-            "SELECT id,text,weight FROM memory WHERE player=? AND char=? "
-            "ORDER BY id DESC LIMIT 60", (db.PLAYER, c)):
+            "SELECT id,ts,kind,text,weight,status,target FROM memory "
+            "WHERE player=? AND char=? ORDER BY id DESC LIMIT 60",
+            (db.PLAYER, c)).fetchall():
+        closed = r["kind"] == "promise" and r["status"]
+        if closed and _age_days(r["ts"]) >= config.PROMISE_REDO_DAYS:
+            continue        # 오래전에 끝난 약속 — 같은 말이면 새 약속이다
         og, ogw = seq_grams(r["text"]), grams(r["text"])
         if not og:
             continue
@@ -79,22 +91,42 @@ def remember(con, kind: str, text: str, weight: int = 1, char=None) -> bool:
         # 그래서 단어 단위 겹침을 한 번 더 확인한다.
         word_jacc = len(gw & ogw) / max(1, len(gw | ogw))
         if (jacc >= 0.6 or contain >= 0.7) and word_jacc >= 0.35:
-            con.execute(
-                "UPDATE memory SET weight=MIN(weight+1,5), ts=? WHERE id=?",
-                (db.now(), r["id"]))
-            return False
-    con.execute(
-        "INSERT INTO memory(player,char,ts,kind,text,weight,hits,last_used) "
-        "VALUES(?,?,?,?,?,?,0,'')",
-        (db.PLAYER, c, db.now(), kind, text[:280], weight))
-    return True
+            if closed:
+                # 최근에 지켰거나 어긴 약속을 다시 꺼낸 것 — 새 약속이 아니다.
+                # 기억 압축이 같은 대화를 다시 읽고 지킨 약속을 되살리면,
+                # 닷새 뒤 지킨 약속으로 감점을 받았다.
+                return 0
+            # 약속은 시각을 건드리지 않는다 — 기한이 그 시각부터 흐른다.
+            # 같은 약속을 다시 말했다고 기한이 늘어나면 안 된다.
+            if r["kind"] == "promise":
+                con.execute(
+                    "UPDATE memory SET weight=MIN(weight+1,5), "
+                    "target=CASE WHEN target='' THEN ? ELSE target END "
+                    "WHERE id=?", (target or "", r["id"]))
+            else:
+                con.execute("UPDATE memory SET weight=MIN(weight+1,5), ts=? "
+                            "WHERE id=?", (db.now(), r["id"]))
+            return 0
+    cur = con.execute(
+        "INSERT INTO memory(player,char,ts,kind,text,weight,hits,last_used,"
+        "target) VALUES(?,?,?,?,?,?,0,'',?)",
+        (db.PLAYER, c, db.now(), kind, text[:280], weight, target or ""))
+    return cur.lastrowid or 0
 
 
 # ── 읽기 ───────────────────────────────────────────────────────────────
+_PROMISE_MARK = {"kept": "지켰다", "broken": "어겼다", "forgotten": "어겼다"}
+
+
 def relevant(con, query: str = "", n: int = 8):
-    """지금 대화에 관련된 기억을 고른다. [(text, kind)] 최신순."""
+    """지금 대화에 관련된 기억을 고른다. [(text, kind)] 최신순.
+
+    약속은 끝났는지를 붙여서 준다. 안 붙이면 지킨 약속을 아직 기다리는
+    것처럼 꺼낸다.
+    """
     rows = con.execute(
-        "SELECT id,ts,kind,text,weight FROM memory WHERE player=? AND char=? "
+        "SELECT id,ts,kind,text,weight,status FROM memory "
+        "WHERE player=? AND char=? "
         "ORDER BY id DESC LIMIT 200", (db.PLAYER, db.CHAR)).fetchall()
     if not rows:
         return []
@@ -118,7 +150,14 @@ def relevant(con, query: str = "", n: int = 8):
             f"UPDATE memory SET hits=hits+1, last_used=? "
             f"WHERE id IN ({','.join('?' * len(ids))})", [db.now(), *ids])
     top.sort(key=lambda r: r["id"])
-    return [(r["text"], r["kind"]) for r in top]
+    out = []
+    for r in top:
+        text = r["text"]
+        mark = _PROMISE_MARK.get(r["status"]) if r["kind"] == "promise" else ""
+        if mark:
+            text = f"{text} (약속 — {mark})"
+        out.append((text, r["kind"]))
+    return out
 
 
 def last_conversation(con, current_sess: str, n: int = 6):
@@ -160,10 +199,18 @@ def pending_count(con) -> int:
     return r["n"] or 0
 
 
-def consolidate(con, ask_fn, threshold: int = 30, name: str = "레이") -> int:
+def consolidate(con, ask_fn, threshold: int = 30, name: str = "레이",
+                targets: str = "", check_target=None) -> int:
     """오래된 대화를 기억 몇 줄로 압축한다. LLM 호출 1회. 만든 기억 수 반환.
 
-    ask_fn(system, user) -> dict|None  (llm.ask 를 감싼 것)
+    ask_fn(system, user) -> dict|None  (llm.ask 를 FACTS_SCHEMA 로 감싼 것)
+    targets  약속의 이행 대상으로 고를 수 있는 것들의 설명(persona 가 만든다)
+    check_target(t) -> str  이행 대상 검증. 모르는 대상이면 '' (말로 한
+             약속). 검증 없이 넣으면 없는 장소를 대상으로 한 약속이 생겨
+             지킬 길 없이 감점만 받는다.
+
+    응답에 facts 가 없으면(프로바이더 실패·엉뚱한 모양) 표시를 옮기지
+    않는다. 옮기면 그 구간 대화는 다시는 압축될 기회가 없다.
     """
     if pending_count(con) < threshold:
         return 0
@@ -196,25 +243,38 @@ def consolidate(con, ask_fn, threshold: int = 30, name: str = "레이") -> int:
         "아무것도 없으면 빈 배열을 내라.\n"
         "여러 사실을 한 문장에 묶지 마라. 하나씩 따로 쓴다.\n\n"
         "JSON 하나만 출력한다. 코드펜스 금지.\n"
-        '{"facts":[{"text":"한 문장으로 쓴 사실","kind":"promise|fact|event"}]}\n'
+        '{"facts":[{"text":"한 문장으로 쓴 사실","kind":"promise|fact|event",'
+        '"target":"약속이면 이행 대상, 아니면 빈 문자열"}]}\n'
         "각 text 는 40자 이내. 최대 7개."
+        + (f"\n\n[약속의 이행 대상]\n{targets}" if targets else "")
         + known_block)
     got = ask_fn(system, f"[대화 기록]\n{convo}")
 
+    facts = got.get("facts") if isinstance(got, dict) else None
+    if not isinstance(facts, list):
+        return 0
+
     made = 0
-    if isinstance(got, dict):
-        for f in (got.get("facts") or [])[:7]:
-            if isinstance(f, dict):
-                text, kind = f.get("text", ""), f.get("kind", "fact")
-            elif isinstance(f, str):
-                text, kind = f, "fact"
-            else:
-                continue
-            if kind not in ("promise", "fact", "event"):
-                kind = "fact"
-            w = 3 if kind == "promise" else 2
-            if isinstance(text, str) and remember(con, kind, text, weight=w):
-                made += 1
+    for f in facts[:7]:
+        if isinstance(f, dict):
+            text, kind = f.get("text", ""), f.get("kind", "fact")
+            target = f.get("target", "") if kind == "promise" else ""
+        elif isinstance(f, str):
+            text, kind, target = f, "fact", ""
+        else:
+            continue
+        if kind not in ("promise", "fact", "event"):
+            kind = "fact"
+        w = 3 if kind == "promise" else 2
+        if not isinstance(text, str):
+            continue
+        # 대화 기록에서 온 텍스트도 이후 프롬프트에 실린다 — 정화
+        text = re.sub(r"[\[\]\r\n]+", " ", text)
+        target = re.sub(r"[^a-z0-9_:-]", "", str(target or "").lower())[:40]
+        if target and check_target is not None:
+            target = check_target(target)
+        if remember(con, kind, text, weight=w, target=target):
+            made += 1
     db.put(con, "consolidated_upto", rows[-1]["id"])
     prune(con)
     return made

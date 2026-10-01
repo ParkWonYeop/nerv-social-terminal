@@ -110,6 +110,7 @@ class ShopRow:
     affordable: bool = True
     given: int = 0             # 선물만 — 준 횟수
     locked: bool = False
+    reason: str = ""           # 지금 못 고르는 이유(쿨다운 등). 있으면 잠긴다
 
 
 @dataclass
@@ -155,6 +156,9 @@ class StatusView:
     impression: str = ""
     doubts: str = ""
     broken_promises: list = field(default_factory=list)   # (text, days)
+    open_promises: list = field(default_factory=list)     # (text, how, days)
+    kept_promises: list = field(default_factory=list)     # text
+    care: list = field(default_factory=list)              # 문자열 줄
     work_days: list = field(default_factory=list)         # WorkDay
     ledger: list = field(default_factory=list)            # LedgerRow
     total_earned: int = 0
@@ -183,6 +187,7 @@ class WorklogView:
     char_name: str
     today: list = field(default_factory=list)     # 문자열 줄
     past: list = field(default_factory=list)      # (day, text)
+    events: list = field(default_factory=list)    # 문자열 줄 — 눈에 띄는 일
 
 
 @dataclass

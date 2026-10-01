@@ -34,6 +34,55 @@ def _note(msg: str) -> None:
          always=True)
 
 
+def _agent_of(payload: dict) -> str:
+    """이 훅을 부른 에이전트. 설치기가 명령 끝에 적어 둔 이름이 먼저다
+    (`eva hook codex`). 옛 설치본에는 없으니 페이로드로 짐작한다."""
+    if len(sys.argv) > 2 and sys.argv[1] == "hook":
+        return sys.argv[2].strip().lower()
+    path = str(payload.get("transcript_path") or "")
+    if "/.codex/" in path:
+        return "codex"
+    if "/.claude/" in path:
+        return "claude"
+    return "codex" if "turn_id" in payload else "claude"
+
+
+def _enabled(agent: str) -> bool:
+    """설정 → '보상·근무 기록 대상' 에서 체크한 에이전트인가.
+
+    체크를 푼 에이전트에서 한 일은 적립하지 않는다 — 세션 기록도 읽지
+    않는다(work.py). 예전에는 그 설정이 기록 읽기만 정하고 훅은 설정과
+    무관하게 적립해서, 꺼도 보상이 계속 쌓였다.
+    """
+    from . import settings
+    table = settings.get("agents", {}) or {}
+    return bool(table.get(agent))
+
+
+def _remember_commit_only(payload: dict) -> None:
+    """체크를 푼 에이전트 — 적립은 안 하지만 커밋 해시는 적는다.
+
+    안 적으면 '로컬 에이전트' 를 켜 둔 사람에게 이 커밋이 로컬에서 한 일로
+    보여 적립된다. 체크를 푼 쪽의 작업이 다른 문으로 들어오는 셈이다.
+    """
+    if payload.get("hook_event_name") != "PostToolUse":
+        return
+    ti = payload.get("tool_input") or {}
+    cmd = str(ti.get("command", "")) if isinstance(ti, dict) else ""
+    if "commit" not in cmd:
+        return
+    try:
+        from . import db, economy, local
+        if not economy._COMMIT.search(economy.strip_literals(cmd)):
+            return
+        with db.session(write=True) as con:
+            db.init(con, with_characters=False)
+            local.note_commit(con, str(payload.get("cwd") or ""),
+                              _agent_of(payload), cmd)
+    except Exception as exc:                                  # noqa: BLE001
+        _note(f"commit-only ERROR {type(exc).__name__}: {exc}")
+
+
 def _locked(exc) -> bool:
     import sqlite3
     return (isinstance(exc, sqlite3.OperationalError)
@@ -52,8 +101,27 @@ def _tool_ok(event: str, payload: dict) -> bool:
     return True
 
 
+# 도구 호출에서 생긴 일 → 상태줄 한 마디의 종류. 앞에 있는 것이 이긴다.
+_QUIP_ORDER = (
+    (("danger", None), "danger"),
+    (("event", "recovered"), "recovered"),
+    (("event", "new_project"), "new_project"),
+    (("event", "late_night"), "late"),
+    (("commit", None), "commit"),
+    (("fail", None), "fail"),
+)
+
+
+def _quip_kind(results) -> str:
+    for (kind, value), quip in _QUIP_ORDER:
+        for k, v in results:
+            if k == kind and (value is None or v == value):
+                return quip
+    return ""
+
+
 def _run(payload: dict) -> None:
-    from . import db, economy
+    from . import db, economy, widget
 
     event = payload.get("hook_event_name", "")
     sid = payload.get("session_id", "") or ""
@@ -66,31 +134,49 @@ def _run(payload: dict) -> None:
             tool = payload.get("tool_name", "") or ""
             ti = payload.get("tool_input") or {}
             economy.roll_day(con)
-            events = economy.on_tool(
+            results = economy.on_tool(
                 con, tool=tool, tool_input=ti if isinstance(ti, dict) else {},
                 tool_response=payload.get("tool_response"),
                 ok=_tool_ok(event, payload), session_id=sid,
+                cwd=str(payload.get("cwd") or ""),
             )
             economy.touch_activity(con)
-            _debug(f"{event} {tool} -> {events}")
+            if any(k == "commit" for k, _ in results):
+                # 이 커밋은 여기서 만든 것 — 로컬 판독이 또 세지 않게
+                from . import local
+                local.note_commit(con, str(payload.get("cwd") or ""),
+                                  _agent_of(payload),
+                                  str((ti if isinstance(ti, dict) else {})
+                                      .get("command", "")))
+            kind = _quip_kind(results)
+            if kind:
+                widget.quip(con, kind, force=(kind == "danger"))
+            _debug(f"{event} {tool} -> {results}")
 
         elif event == "Stop":
             economy.roll_day(con)
             got = economy.on_stop(con, sid)
             economy.touch_activity(con)
+            widget.quip(con, "stop")
             _debug(f"Stop -> +{got}")
 
         elif event == "SessionStart":
-            # 방치는 캐릭터마다 따로 서운해한다
-            settled = [economy.settle_neglect(con, char=c)
-                       for c in db.known_chars(con)]
+            # 방치는 여기서 매기지 않는다 — 그 캐릭터를 찾아갔을 때
+            # 게임이 '마지막으로 만난 뒤' 를 기준으로 매긴다.
             streak, bonus = economy.roll_day(con)
             economy.touch_activity(con)
-            _debug(f"SessionStart neglect={settled} streak={streak}/+{bonus}")
+            _debug(f"SessionStart streak={streak}/+{bonus}")
 
         elif event == "SessionEnd":
             economy.touch_activity(con)
             _debug("SessionEnd")
+
+        elif event in ("Notification", "PermissionRequest"):
+            # 에이전트가 사람을 기다린다 — Claude 는 Notification, Codex 는
+            # PermissionRequest. 작업 실적은 아니다. 아무것도 출력하지 않으므로
+            # Codex 는 평소 승인 흐름대로 간다.
+            widget.quip(con, "notify")
+            _debug(event)
 
 
 def main() -> int:
@@ -110,6 +196,12 @@ def main() -> int:
         payload = json.loads(raw)
     except Exception:
         return 0
+    try:
+        if not _enabled(_agent_of(payload)):
+            _remember_commit_only(payload)
+            return 0
+    except Exception:                                         # noqa: BLE001
+        pass              # 설정을 못 읽으면 예전처럼 적립한다
     import time
     t0 = time.monotonic()
     try:

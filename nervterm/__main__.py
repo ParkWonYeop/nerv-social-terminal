@@ -26,8 +26,9 @@ if len(sys.argv) > 1 and sys.argv[1] == "line":
     from .widget import main as _widget_main
     sys.exit(_widget_main())
 
-from . import (characters, db, economy, game, menu, plugins, recall, settings,
-               stance, term, ui, world)
+from . import (characters, db, economy, game, menu, plugins, settings, term,
+               ui, world)
+from .hangul import josa
 from .ui import view as V
 
 
@@ -121,7 +122,8 @@ def play(con, char, args) -> str:
 
     made = g.consolidate()
     if made:
-        g.push("sys", f"{char.name}가 지난 대화를 정리했다. 기억 {made}개.")
+        g.push("sys", f"{josa(char.name, '이/가')} 지난 대화를 정리했다. "
+                      f"기억 {made}개.")
     g.greet()
 
     while True:
@@ -155,6 +157,10 @@ def play(con, char, args) -> str:
             g.date(arg)
         elif cmd in ("gift", "g", "shop"):
             g.gift(arg)
+        elif cmd in ("care", "c", "돌봄"):
+            g.care(arg)
+        elif cmd in ("episode", "ep", "e", "이야기"):
+            g.episode(arg)
         elif cmd in ("status", "s", "log"):
             g.status()
         elif cmd in ("memory", "mem", "m"):
@@ -175,6 +181,10 @@ def say_once(words) -> int:
 
     Claude Code 안에서 `! eva say 안녕` 으로 쓴다. 전체화면을 열지 않으니
     작업하던 화면이 그대로 남는다. 상태줄 위젯과 짝이다.
+
+    게임과 같은 길을 지난다(Game(headless=True)) — 지루함 감점, 인내
+    회복, 방치·약속 정산까지. 예전에는 대화 처리를 여기 따로 복제해
+    절반만 적용했고, 그래서 say 위주로 쓰면 인내가 줄기만 했다.
     """
     text = " ".join(words).strip()
     if not text:
@@ -198,44 +208,16 @@ def say_once(words) -> int:
         db.set_char(char.id)
         ui.set_character(char)
 
-        g = game.Game(con, char, offline=False, animate=False)
-        st = g.state()
-        boring = stance.check_boring(con, text)
-        db.say(con, "user", text, "", g.sess)
-
-        with ui.thinking(char.name):
-            got = g.ask(st, f"[상대가 방금 한 말]\n{text}\n\n"
-                            f"{char.name}로서 응답하라.",
-                        query=text, boring=boring)
-
-        # 화면에 그리지 않고 DB 반영만 하고, 답만 찍는다
-        if got.get("narration"):
-            ui.dim(got["narration"])
-        ui.console.print(ui.entry_text(V.LogEntry("rei", got["line"],
-                                                  got.get("emotion", ""))))
-        if got.get("inner"):
-            ui.console.print(ui.entry_text(V.LogEntry("inner", got["inner"])))
-
-        db.say(con, "rei", got["line"], got.get("emotion", ""), g.sess)
-        if got.get("affection_delta"):
-            economy.apply(con, aff=got["affection_delta"], kind="talk",
-                          reason=got["line"][:60])
-        moved = stance.apply_response(con, got)
-        bits = []
-        if got.get("affection_delta"):
-            bits.append(("호감", got["affection_delta"]))
-        for f in ("trust", "interest", "patience"):
-            if moved.get(f):
-                bits.append((game.Game.LABEL[f], moved[f]))
-        if bits:
-            ui.console.print(ui.entry_text(V.LogEntry(
-                "delta", " · ".join(f"{n} {'+' if d > 0 else ''}{d}"
-                                    for n, d in bits))))
-        if got.get("memory"):
-            recall.remember(con, "fact", got["memory"])
-        db.bump(con, "turns", 1)
-        g.remember_for_widget()
-        con.commit()
+        g = game.Game(con, char, offline=False, animate=False, headless=True)
+        g.settle()
+        g.talk(text)
+        for entry in g.buf:
+            if entry.role == "user":
+                continue
+            if entry.role == "narr":
+                ui.dim(entry.text)
+            else:
+                ui.console.print(ui.entry_text(entry))
     return 0
 
 
@@ -243,6 +225,9 @@ def main() -> int:
     # 훅·위젯 모드는 위 모듈 최상단에서 이미 갈라져 나갔다.
     if len(sys.argv) > 1 and sys.argv[1] == "say":
         return say_once(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "setup":
+        from .wizard import main as setup_main
+        return setup_main(sys.argv[2:])
     args = parse()
     if args.plugins:
         return show_plugins()
