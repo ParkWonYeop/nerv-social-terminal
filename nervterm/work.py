@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Claude Code 트랜스크립트에서 '무슨 작업을 했는지' 뽑아낸다.
+"""에이전트 세션 기록에서 '무슨 작업을 했는지' 뽑아낸다.
 
 LLM을 쓰지 않는다. Claude Code가 이미 저장해 둔 것들을 줍는다:
   · ai-title    세션마다 자동 생성된 제목  ← 가장 좋은 요약
@@ -10,11 +10,16 @@ LLM을 쓰지 않는다. Claude Code가 이미 저장해 둔 것들을 줍는다
 읽은 바이트 위치를 기억해 증분으로만 읽는다.
 """
 import json
-import re
+import time
 
 from . import agents, db
 
 MAX_BYTES_PER_SCAN = 4_000_000        # 한 번에 읽을 상한(폭주 방지)
+
+# 아직 한 번도 안 읽은 파일 중 이보다 오래된 것은 건너뛴다. 반년 전
+# 작업이 지금 대화에 나올 일은 없고, 그걸 다 읽으려 들면 밀린 기록이
+# 끝없이 예산을 먹는다.
+RECENT_DAYS = 14
 
 
 def _add(con, day, ts, kind, text, sid="", agent="claude"):
@@ -33,8 +38,18 @@ def scan(con, *, budget=MAX_BYTES_PER_SCAN) -> int:
     에이전트마다 파일 위치도 레코드 형식도 다르다. 그 차이는 전부
     agents.py 가 안다 — 여기는 '증분으로 읽고 넣는' 일만 한다.
     """
+    # 예산을 에이전트끼리 나눈다. 앞의 에이전트가 통째로 가져가면 뒤의
+    # 것은 영영 못 읽는다 — 실제로 Claude 쪽에 밀린 기록이 늘 4MB 를
+    # 넘어서, Codex 는 설치한 첫날 이후로 한 줄도 안 읽혔다.
+    enabled = agents.enabled()
+    if not enabled:
+        return 0
+    share = budget // len(enabled)
     read_total = 0
-    for agent in agents.enabled():
+    for agent in enabled:
+        read_total += _scan_agent(con, agent, share)
+    # 남은 몫은 아직 읽을 게 있는 쪽이 쓴다
+    for agent in enabled:
         if read_total >= budget:
             break
         read_total += _scan_agent(con, agent, budget - read_total)
@@ -45,14 +60,19 @@ def _scan_agent(con, agent, budget) -> int:
     read_total = 0
     # 파일마다 한 번씩 묻지 않는다 — 기록이 수천 개면 턴마다 수천 번이다.
     known = {r["path"]: r for r in con.execute(
-        "SELECT path,offset,mtime FROM work_scan WHERE player=?",
+        "SELECT path,offset,mtime,skip FROM work_scan WHERE player=?",
         (db.PLAYER,))}
+    stale = time.time() - RECENT_DAYS * 86400
     for path in agent.session_files():
         try:
             stat = path.stat()
         except OSError:
             continue
         row = known.get(str(path))
+        if row is not None and row["skip"]:
+            continue                   # 사람이 한 일이 아닌 세션
+        if row is None and stat.st_mtime < stale:
+            continue                   # 오래된 밀린 기록
         offset = row["offset"] if row else 0
         if row and stat.st_mtime <= row["mtime"] and offset >= stat.st_size:
             continue
@@ -84,7 +104,7 @@ def _scan_agent(con, agent, budget) -> int:
                         # 파일 끝이 아직 개행 전 — 쓰는 중이니 다음에 다시
                         blob = b""
                         consumed = 0
-                sid = path.stem
+                sid = agent.session_id(path)
                 # 옛(텍스트 모드) 오프셋이 줄 중간을 가리켜도 그 줄만
                 # json.loads 에서 버려지고 다음 줄부터 저절로 재동기화된다.
                 for bline in blob.split(b"\n"):
@@ -100,6 +120,8 @@ def _scan_agent(con, agent, budget) -> int:
                     except Exception:
                         continue
                     batch.extend(facts)
+                    if any(f[2] == agents.SKIP_FILE for f in facts):
+                        break          # 나머지는 읽을 필요가 없다
                 read_total += consumed
                 new_offset = offset + consumed
         except OSError:
@@ -107,16 +129,21 @@ def _scan_agent(con, agent, budget) -> int:
         # 파일 하나치를 짧은 트랜잭션 하나로. 읽고 파싱하는 동안에는 락을
         # 쥐지 않는다 — 그 사이 훅이 막히면 안 된다. 사실과 읽은 위치가
         # 함께 들어가야 다음 스캔이 같은 줄을 다시 읽지 않는다.
+        skip = any(f[2] == agents.SKIP_FILE for f in batch)
+        if skip:
+            batch, new_offset = [], stat.st_size
         with db.tx(con):
             for day, ts, kind, text, fsid in batch:
                 _add(con, day, ts, kind, text, fsid, agent.id)
                 if kind == "project":
                     _seen_project(con, text, ts)
             con.execute(
-                "INSERT INTO work_scan(player,path,offset,mtime) "
-                "VALUES(?,?,?,?) ON CONFLICT(player,path) DO UPDATE SET "
-                "offset=excluded.offset, mtime=excluded.mtime",
-                (db.PLAYER, str(path), new_offset, stat.st_mtime))
+                "INSERT INTO work_scan(player,path,offset,mtime,skip) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(player,path) DO UPDATE SET "
+                "offset=excluded.offset, mtime=excluded.mtime, "
+                "skip=excluded.skip",
+                (db.PLAYER, str(path), new_offset, stat.st_mtime,
+                 1 if skip else 0))
     return read_total
 
 
@@ -132,10 +159,24 @@ def _seen_project(con, label, ts):
                     "VALUES(?,?,?)", (db.PLAYER, name, ts or db.now()))
 
 
+def _only_enabled(alias=""):
+    """체크한 에이전트의 기록만 — (SQL 조각, 인자).
+
+    체크를 푼 에이전트에서 한 일은 캐릭터가 모른다. 이미 읽어 둔 것도
+    보여주지 않는다 — 다시 체크하면 그대로 돌아온다.
+    """
+    ids = [a.id for a in agents.enabled()]
+    col = f"{alias}.agent" if alias else "agent"
+    if not ids:
+        return " AND 0", []
+    return f" AND {col} IN ({','.join('?' * len(ids))})", ids
+
+
 def facts(con, day=None, kind=None, limit=40):
     day = day or db.today()
-    q = "SELECT kind,text,ts FROM work_facts WHERE player=? AND day=?"
-    args = [db.PLAYER, day]
+    only, ids = _only_enabled()
+    q = "SELECT kind,text,ts FROM work_facts WHERE player=? AND day=?" + only
+    args = [db.PLAYER, day, *ids]
     if kind:
         q += " AND kind=?"
         args.append(kind)
@@ -146,19 +187,22 @@ def facts(con, day=None, kind=None, limit=40):
 
 def _human_titles(con, day, n=4):
     """그 날 사람이 실제로 타이핑한 세션들의 자동 생성 제목."""
+    only, ids = _only_enabled("p")
     rows = con.execute(
         "SELECT DISTINCT t.text FROM work_facts t "
         "WHERE t.player=? AND t.kind='title' AND t.sid IN ("
         "  SELECT DISTINCT p.sid FROM work_facts p "
         "  WHERE p.player=? AND p.kind='prompt' AND p.day=? AND p.sid<>''"
-        ") LIMIT ?", (db.PLAYER, db.PLAYER, day, n)).fetchall()
+        + only + ") LIMIT ?", (db.PLAYER, db.PLAYER, day, *ids, n)).fetchall()
     return [r["text"] for r in rows]
 
 
 def _pick(con, day, kind, n):
+    only, ids = _only_enabled()
     rows = con.execute(
-        "SELECT text FROM work_facts WHERE player=? AND day=? AND kind=? "
-        "ORDER BY id DESC LIMIT ?", (db.PLAYER, day, kind, n)).fetchall()
+        "SELECT text FROM work_facts WHERE player=? AND day=? AND kind=?"
+        + only + " ORDER BY id DESC LIMIT ?",
+        (db.PLAYER, day, kind, *ids, n)).fetchall()
     return [r["text"] for r in reversed(rows)]
 
 
@@ -193,9 +237,11 @@ def digest(con, day=None) -> str:
 
 def past_days(con, days=5, skip_today=True):
     """지난 날들의 한 줄 요약. [(day, text), …]"""
+    only, ids = _only_enabled()
     rows = con.execute(
-        "SELECT DISTINCT day FROM work_facts WHERE player=? AND day<>'' "
-        "ORDER BY day DESC LIMIT ?", (db.PLAYER, days + 2)).fetchall()
+        "SELECT DISTINCT day FROM work_facts WHERE player=? AND day<>''"
+        + only + " ORDER BY day DESC LIMIT ?",
+        (db.PLAYER, *ids, days + 2)).fetchall()
     out = []
     today = db.today()
     for r in rows:

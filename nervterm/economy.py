@@ -188,16 +188,11 @@ def on_tool(con, *, tool: str, tool_input: dict, tool_response, ok: bool,
     if committed:
         db.daily_bump(con, "commits", 1)
         base += config.COMMIT_BONUS
-        # 꾸준함이 관계를 조금 움직인다 — 하루 상한 안에서, 만난 적
-        # 있는 사람에게만. 호감은 대화로 쌓는 것이다.
+        # 꾸준함은 신뢰를 조금 만든다 — 하루 상한 안에서, 만난 적 있는
+        # 사람에게만. 호감은 주지 않는다: 대화로 쌓는 것이다.
         for c in db.known_chars(con):
             if not met(con, c):
                 continue
-            aff = capped(con, c, "commit_aff", config.AFF_COMMIT,
-                         config.AFF_COMMIT_DAILY_MAX)
-            if aff:
-                apply(con, aff=aff, kind="commit", reason="커밋",
-                      session_id=session_id, char=c)
             trust = capped(con, c, "commit_trust", config.TRUST_COMMIT,
                            config.TRUST_COMMIT_DAILY_MAX)
             if trust:

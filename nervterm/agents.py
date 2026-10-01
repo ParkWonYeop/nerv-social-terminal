@@ -83,6 +83,11 @@ def commit_message(cmd: str) -> str:
     return msg[:120]
 
 
+# harvest() 가 이걸 kind 로 내면 그 세션 파일은 사람이 한 일이 아니다 —
+# work.py 가 파일째 건너뛰고 다시 읽지 않는다(work_scan.skip).
+SKIP_FILE = "__skip__"
+
+
 class Agent:
     """에이전트 하나."""
 
@@ -121,6 +126,10 @@ class Agent:
     def session_files(self):
         return []
 
+    def session_id(self, path) -> str:
+        """세션 파일 → 세션 id. 제목과 프롬프트를 이어 붙이는 열쇠."""
+        return path.stem
+
     @staticmethod
     def newest_first(paths):
         """최근에 고친 파일부터.
@@ -156,13 +165,14 @@ class ClaudeAgent(Agent):
     id = "claude"
     label = "Claude Code"
     install_hint = "python3 install-hooks.py"
-    # PostToolUseFailure 는 Claude Code 에 없는 이벤트라 등록하지 않는다.
-    # 실패 감지는 PostToolUse 페이로드의 tool_response.is_error 로 충분
-    # (hook.py). 기존 설치본의 잔존 등록은 재설치 시 걷어내진다.
+    # PostToolUse 는 **성공한** 도구 호출에만 발동한다. 실패는
+    # PostToolUseFailure 로 따로 온다(공식 문서: "After a tool call fails").
+    # 한때 '없는 이벤트' 로 잘못 알고 등록을 걷어냈다 — 그 뒤로 연속 실패
+    # 감점·실패 한 마디·'실패 끝에 통과' 사건이 사실상 죽어 있었다.
     # Notification — 에이전트가 사람을 기다릴 때. 상태줄 한 마디만 건다.
-    events = ("PostToolUse", "Stop", "SessionStart", "SessionEnd",
-              "Notification")
-    tool_events = ("PostToolUse",)
+    events = ("PostToolUse", "PostToolUseFailure", "Stop", "SessionStart",
+              "SessionEnd", "Notification")
+    tool_events = ("PostToolUse", "PostToolUseFailure")
 
     def hook_path(self) -> Path:
         return Path.home() / ".claude" / "settings.json"
@@ -244,25 +254,45 @@ class CodexAgent(Agent):
     똑같고, 이벤트 이름도 같은 PascalCase 다.
 
     세션 기록은 ~/.codex/sessions/<연>/<월>/<일>/rollout-*.jsonl 이고
-    형식은 Claude 와 전혀 다르다:
+    형식은 Claude 와 전혀 다르다. 그리고 **판마다 바뀐다** — 둘 다 읽는다.
 
+    옛 판 (~0.1xx 초)
         event_msg:user_message        사람이 친 프롬프트
         event_msg:patch_apply_end     적용된 파일 수정 (changes 에 경로)
-        session_meta / turn_context   작업 디렉터리
         function_call exec_command    셸 명령 (arguments 안에 JSON)
-        custom_tool_call exec         셸 명령 (input 안에 JS)
         custom_tool_call apply_patch  파일 수정 (*** Update File: 경로)
         function_call update_plan     작업 단계 — Claude 의 description 자리
 
-    Codex 에는 ai-title 같은 자동 제목이 없다. 제목을 억지로 지어내는
-    대신 안 만든다 — work.py 의 요약이 제목이 없으면 프롬프트로
-    대신하게 돼 있고, 그게 더 정직하다.
+    지금 판 (0.153 에서 확인)
+        event_msg:item_completed 의 item 하나하나:
+          UserMessage        사람이 친 프롬프트 (content[].text)
+          FileChange         적용된 파일 수정 (changes 의 키가 경로)
+          CommandExecution   셸 명령 (command 는 argv 목록)
+        옛 판의 user_message·patch_apply_end·update_plan 은 더 안 나온다.
+        이걸 몰라서 0.153 이후의 Codex 작업은 근무 일지에 하나도 안 잡혔다.
+
+    공통
+        session_meta / turn_context   작업 디렉터리
+        custom_tool_call exec         셸 명령 (input 안에 JS)
+
+    **승인 검토 스레드는 사람이 한 일이 아니다.** 자동 검토(auto_review)를
+    켜면 승인 요청마다 guardian 서브 에이전트가 세션을 하나씩 만든다 —
+    실제 기록에서 세션 파일의 절반 이상이 이것이었다. session_meta 에
+    parent_thread_id 가 있거나 thread_source 가 user 가 아니면 파일째
+    건너뛴다(Claude 의 isSidechain 과 같은 자리).
+
+    제목은 ~/.codex/session_index.jsonl 의 thread_name 이다 — Claude 의
+    ai-title 자리. 세션 id(파일 이름 끝의 UUID)로 프롬프트와 이어진다.
     """
 
     id = "codex"
     label = "Codex"
     install_hint = "python3 install-hooks.py --agent codex"
-    events = ("PostToolUse", "Stop", "SessionStart", "SessionEnd")
+    # PermissionRequest — 에이전트가 사람의 승인을 기다릴 때. 상태줄 한
+    # 마디만 건다. 아무것도 출력하지 않으므로 Codex 는 평소 승인 흐름대로
+    # 간다("If no matching hook decides, Codex uses the normal approval flow").
+    events = ("PostToolUse", "Stop", "SessionStart", "SessionEnd",
+              "PermissionRequest")
     tool_events = ("PostToolUse",)
     # Codex 는 종료 훅을 3초로 잘라 버리고, 더 큰 값을 적어 두면
     # 실행할 때마다 "clamping SessionEnd hook timeout" 경고를 찍는다.
@@ -280,11 +310,54 @@ class CodexAgent(Agent):
     def sessions_dir(self) -> Path:
         return self.home() / "sessions"
 
+    _SID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                      r"[0-9a-f]{12})$")
+
     def session_files(self):
         root = self.sessions_dir()
-        if not root.is_dir():
-            return []
-        return self.newest_first(root.glob("**/rollout-*.jsonl"))
+        out = []
+        if root.is_dir():
+            out = list(root.glob("**/rollout-*.jsonl"))
+        index = self.home() / "session_index.jsonl"
+        if index.is_file():
+            out.append(index)            # 스레드 제목
+        return self.newest_first(out)
+
+    def session_id(self, path) -> str:
+        """rollout-2026-10-01T19-02-52-<UUID>.jsonl → <UUID>
+
+        session_index.jsonl 의 id 가 이 UUID 다. 파일 이름 통째로 쓰면
+        제목과 프롬프트가 이어지지 않는다.
+        """
+        m = self._SID.search(path.stem)
+        return m.group(1) if m else path.stem
+
+    @staticmethod
+    def _argv_command(cmd) -> str:
+        """CommandExecution 의 command(argv 목록) → 셸 명령 문자열.
+
+        ["/bin/zsh", "-lc", "git commit -m '…'"] 처럼 셸에 넘긴 것이면 그
+        문자열이 실제 명령이다.
+        """
+        if isinstance(cmd, str):
+            return cmd
+        if not isinstance(cmd, list):
+            return ""
+        parts = [str(x) for x in cmd]
+        if len(parts) >= 3 and parts[-2] in ("-c", "-lc", "-ic"):
+            return parts[-1]
+        return " ".join(parts)
+
+    @staticmethod
+    def _subagent(meta: dict) -> bool:
+        """사람이 연 스레드가 아닌가 — 승인 검토(guardian) 같은 것."""
+        if meta.get("parent_thread_id"):
+            return True
+        source = meta.get("thread_source")
+        if source and source != "user":
+            return True
+        src = meta.get("source")
+        return isinstance(src, dict) and "subagent" in src
 
     # ── 명령 문자열 뽑기 ───────────────────────────────────────────────
     #
@@ -346,6 +419,16 @@ class CodexAgent(Agent):
         out = []
         t = rec.get("type")
         payload = rec.get("payload")
+
+        if t is None and "thread_name" in rec and rec.get("id"):
+            # session_index.jsonl 한 줄 — 스레드 제목. 날짜는 비워 둔다:
+            # 그 세션에 사람이 친 프롬프트가 있는 날로 귀속된다(work.py).
+            from . import db
+            name = _clean(str(rec.get("thread_name") or ""))
+            if name:
+                out.append(("", db.now(), "title", name[:120], str(rec["id"])))
+            return out
+
         if not isinstance(payload, dict):
             return out
         ptype = payload.get("type", "")
@@ -353,11 +436,16 @@ class CodexAgent(Agent):
         sid = sid_fallback
 
         if t == "session_meta":
-            sid = payload.get("session_id") or sid_fallback
+            if self._subagent(payload):
+                return [(day, ts, SKIP_FILE, "", sid)]
             cwd = payload.get("cwd") or ""
             if cwd:
                 out.append((day, ts, "project", os.path.basename(cwd), sid))
             return out
+
+        if t == "event_msg" and ptype == "item_completed":
+            return self._harvest_item(payload.get("item") or {}, day, ts,
+                                      sid)
 
         if t == "turn_context":
             cwd = payload.get("cwd") or ""
@@ -407,6 +495,32 @@ class CodexAgent(Agent):
                 return out
 
             msg = commit_message(self._command_of(payload))
+            if msg:
+                out.append((day, ts, "commit", msg, sid))
+        return out
+
+
+    def _harvest_item(self, item, day, ts, sid):
+        """지금 판의 item_completed 항목 하나."""
+        out = []
+        kind = item.get("type") if isinstance(item, dict) else ""
+        if kind == "UserMessage":
+            text = " ".join(
+                str(c.get("text") or "") for c in (item.get("content") or [])
+                if isinstance(c, dict) and c.get("type") == "text")
+            msg = _clean(text)
+            if msg and not self._injected(msg):
+                out.append((day, ts, "prompt", msg[:160], sid))
+        elif kind == "FileChange":
+            if item.get("status") not in (None, "completed"):
+                return out
+            for path in (item.get("changes") or {}):
+                out.append((day, ts, "file",
+                            os.path.basename(str(path).strip()), sid))
+        elif kind == "CommandExecution":
+            if item.get("status") not in (None, "completed"):
+                return out
+            msg = commit_message(self._argv_command(item.get("command")))
             if msg:
                 out.append((day, ts, "commit", msg, sid))
         return out

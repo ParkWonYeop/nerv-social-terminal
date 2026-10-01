@@ -39,6 +39,28 @@ def _post(url, payload, headers, timeout):
         return None, 0
 
 
+def get_json(url, headers=None, timeout=6):
+    """GET 해서 JSON. 실패하면 None — 모델 목록처럼 없어도 되는 것에 쓴다."""
+    req = urllib.request.Request(url, method="GET")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def _why(status: int) -> str:
+    """연결 시험에 보여 줄 사유."""
+    if status == 0:
+        return "연결 실패 또는 시간 초과"
+    hint = {400: "요청 모양이나 모델 이름이 맞지 않다",
+            401: "키가 틀렸다", 403: "이 키로는 쓸 수 없다",
+            404: "그런 모델이나 주소가 없다", 429: "요청이 너무 많다(한도)"}
+    return f"HTTP {status}" + (f" — {hint[status]}" if status in hint else "")
+
+
 def reshape_worth_retry(status: int) -> bool:
     """요청 모양을 바꿔 한 번 더 보낼 만한 실패인가."""
     return 400 <= status < 500 and status not in _NO_RETRY
@@ -62,7 +84,10 @@ class _KeyedProvider(Provider):
 
     def _send(self, url, payload, headers, timeout):
         self.calls += 1
-        return _post(url, payload, headers, timeout)
+        got, status = _post(url, payload, headers, timeout)
+        if got is None:
+            self.last_error = _why(status)
+        return got, status
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -114,6 +139,17 @@ class AnthropicAPI(_KeyedProvider):
             }
         return body
 
+    def catalog(self):
+        if not self.api_key():
+            return []
+        got = get_json(f"{self.base_url.rstrip('/')}/v1/models?limit=100",
+                       {"x-api-key": self.api_key(),
+                        "anthropic-version": "2023-06-01"})
+        return [(m["id"], m.get("display_name") or m["id"],
+                 (m.get("created_at") or "")[:10])
+                for m in (got or {}).get("data") or []
+                if isinstance(m, dict) and m.get("id")]
+
     def complete(self, system, user, *, timeout=None, schema=None):
         url = f"{self.base_url.rstrip('/')}/v1/messages"
         headers = {"x-api-key": self.api_key(),
@@ -126,7 +162,10 @@ class AnthropicAPI(_KeyedProvider):
             got, status = self._send(
                 url, self.payload(system, user, schema, structured=False),
                 headers, wait)
-        if not got or got.get("stop_reason") == "refusal":
+        if got and got.get("stop_reason") == "refusal":
+            self.last_error = "모델이 거절했다 (refusal)"
+            return None
+        if not got:
             return None
         blocks = got.get("content") or []
         return "".join(b.get("text", "") for b in blocks
@@ -158,6 +197,15 @@ class OpenAIAPI(_KeyedProvider):
                                 "schema": schema or RESPONSE_SCHEMA},
             }
         return body
+
+    def catalog(self):
+        """GET /v1/models — 최근 것부터."""
+        got = get_json(f"{self.base_url.rstrip('/')}/v1/models",
+                       {"Authorization": f"Bearer {self.api_key()}"})
+        rows = [m for m in (got or {}).get("data") or []
+                if isinstance(m, dict) and m.get("id")]
+        rows.sort(key=lambda m: -(m.get("created") or 0))
+        return [(m["id"], m["id"], m.get("owned_by") or "") for m in rows]
 
     def complete(self, system, user, *, timeout=None, schema=None):
         url = f"{self.base_url.rstrip('/')}/v1/chat/completions"
@@ -285,6 +333,28 @@ class Ollama(Provider):
         return [m.get("name", "") for m in (got.get("models") or [])
                 if m.get("name")]
 
+    def catalog(self):
+        """설치된 모델. 이 게임에 맞는 순서(PREFERRED)가 먼저, 크기 표시."""
+        got = get_json(f"{self.base_url.rstrip('/')}/api/tags", timeout=3)
+        rows = [m for m in (got or {}).get("models") or []
+                if isinstance(m, dict) and m.get("name")]
+
+        def rank(m):
+            for i, want in enumerate(self.PREFERRED):
+                if m["name"].startswith(want):
+                    return i
+            return len(self.PREFERRED)
+        rows.sort(key=lambda m: (rank(m), m["name"]))
+        out = []
+        for m in rows:
+            size = m.get("size") or 0
+            params = (m.get("details") or {}).get("parameter_size") or ""
+            note = " · ".join(x for x in (
+                params, f"{size / 1e9:.1f} GB" if size else "",
+                "한국어 대사에 추천" if rank(m) == 0 else "") if x)
+            out.append((m["name"], m["name"], note))
+        return out
+
     def payload(self, system, user, schema, *, think_flag=True):
         body = {
             "model": self.model,
@@ -311,6 +381,9 @@ class Ollama(Provider):
         url = f"{self.base_url.rstrip('/')}/api/chat"
         wait = timeout or self.timeout
         self.calls += 1
+        if not self.model:
+            self.last_error = "설치된 모델이 없다 (ollama pull …)"
+            return None
         got, status = _post(url, self.payload(system, user, schema), {}, wait)
         if got is None and reshape_worth_retry(status):
             # think 를 모르는 옛 ollama 일 수 있다(400). 한 번만 빼고 다시.
@@ -320,5 +393,6 @@ class Ollama(Provider):
                 url, self.payload(system, user, schema, think_flag=False),
                 {}, wait)
         if not got:
+            self.last_error = _why(status)
             return None
         return (got.get("message") or {}).get("content")

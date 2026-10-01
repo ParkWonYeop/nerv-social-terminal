@@ -429,8 +429,15 @@ class Game:
                     "같은 말도, 같은 소재도 반복하지 마라. 다른 것을 골라라.")
 
         with self._thinking():
-            got = self.ask(st, msg, clamp=1,
+            got = self.ask(st, msg, clamp=0,
                            want_impression=stance.wants_impression(con))
+        # 인사는 캐릭터가 먼저 거는 말이다. 상대는 아직 아무것도 안 했다 —
+        # 관계 수치가 움직일 이유가 없다. 예전에는 +1 까지 허용해서 eva 를
+        # 껐다 켜기만 해도 호감이 올랐다. (말투·기분·인상은 그대로 받는다.)
+        for key in ("affection_delta", "trust_delta", "interest_delta",
+                    "patience_delta"):
+            got[key] = 0
+        got["kept_promise"] = ""
         if not got["narration"] and not self.offline:
             got["narration"] = random.choice(self.char.greet_narr)
         self.speak(got, kind="greet")

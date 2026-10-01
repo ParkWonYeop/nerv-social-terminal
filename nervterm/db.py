@@ -166,7 +166,8 @@ CREATE INDEX IF NOT EXISTS idx_social ON social(player, ts);
 # v1: char 열 없음 / v2: char 분리 / v3: user_version 도입
 # v4: 저장된 LLM 텍스트(기억·인상 등)의 대괄호·개행 정화
 # v5: 약속 상태(status/target), 캐릭터별 last_seen, 근무 사건·사교 기록
-SCHEMA_VERSION = 5
+# v6: 커밋으로 쌓인 자동 호감·신뢰 회수(1회), work_scan.skip
+SCHEMA_VERSION = 6
 
 # 전역 기본값 (char='')
 GLOBAL_DEFAULTS = {
@@ -346,6 +347,9 @@ LATER_COLUMNS = [
     ("memory", "status", "TEXT NOT NULL DEFAULT ''"),
     # 약속의 이행 대상: date:<key> / gift:<key> / visit / rest / ''(말로만)
     ("memory", "target", "TEXT NOT NULL DEFAULT ''"),
+    # 근무 일지가 읽지 않을 세션 파일 — Codex 의 승인 검토 스레드처럼
+    # 사람이 한 일이 아닌 것. 첫 줄(session_meta)을 본 뒤에 표시한다.
+    ("work_scan", "skip", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -468,6 +472,93 @@ def _upgrade_v5(con) -> None:
         "FROM work_facts WHERE kind='project' GROUP BY 1, 2")
 
 
+def _start_values(char_id: str):
+    """(시작 호감, 시작 신뢰). 캐릭터 팩을 읽을 수 없으면 기본값."""
+    aff, trust = config.AFF_START, config.TRUST_START
+    try:
+        from . import characters
+        char = characters.get(char_id)
+        if char is not None and char.id == char_id:
+            aff = int(char.start.get("affection", aff))
+            trust = int(char.start.get("trust", trust))
+    except Exception:                                         # noqa: BLE001
+        pass
+    return aff, trust
+
+
+def _upgrade_v6(con) -> None:
+    """v6 — 커밋으로 쌓인 자동 호감·신뢰를 한 번 회수한다.
+
+    v5 까지는 커밋 한 번에 모든 캐릭터의 호감 +2·신뢰 +1 이었고 상한이
+    없었다. 실제 저장소에서 커밋 868번이 캐릭터마다 호감 +1,736 이 됐고,
+    말 한 번 안 건 사람까지 호감·신뢰 100 이 됐다.
+
+    호감은 장부에 전부 남아 있으므로 커밋 몫만 빼고 처음부터 다시 쌓는다
+    (0~100 경계도 그때처럼 매번 적용한다). 신뢰는 대화로 움직인 몫이 장부에
+    없어서 정확히 되살릴 수 없다 — 새 규칙(커밋한 날 × 하루 상한, 처음
+    만난 뒤부터)으로 다시 상한을 건다. 지금 값보다 올리지는 않는다.
+
+    회수한 양은 장부에 kind='correction' 으로 남긴다 — /status 에 뜬다.
+    """
+    pairs = con.execute(
+        "SELECT DISTINCT player, char FROM ledger "
+        "WHERE kind='commit' AND char<>''").fetchall()
+    for row in pairs:
+        player, char_id = row[0], row[1]
+        # 한 번만. 옛 코드가 판을 5 로 되돌려 이게 다시 돌아도(켜 둔 게임이
+        # 옛 코드로 init 을 부르는 경우) 같은 몫을 두 번 빼지 않는다.
+        if con.execute("SELECT 1 FROM ledger WHERE player=? AND char=? "
+                       "AND kind='correction' LIMIT 1",
+                       (player, char_id)).fetchone():
+            continue
+        start_aff, start_trust = _start_values(char_id)
+        aff = start_aff
+        for (kind, delta) in con.execute(
+                "SELECT kind, delta_aff FROM ledger WHERE player=? AND char=? "
+                "AND delta_aff<>0 ORDER BY id", (player, char_id)):
+            if kind in ("commit", "correction"):
+                continue
+            aff = max(config.AFF_MIN, min(config.AFF_MAX, aff + delta))
+
+        first = con.execute(
+            "SELECT MIN(ts) FROM dialogue WHERE player=? AND char=?",
+            (player, char_id)).fetchone()[0]
+        days = 0
+        if first:
+            days = con.execute(
+                "SELECT COUNT(DISTINCT substr(ts,1,10)) FROM ledger "
+                "WHERE player=? AND char=? AND kind='commit' AND ts>=?",
+                (player, char_id, first)).fetchone()[0]
+        trust_cap = min(100, start_trust
+                        + days * config.TRUST_COMMIT_DAILY_MAX)
+
+        def cur(key, default):
+            got = con.execute(
+                "SELECT value FROM state WHERE player=? AND char=? AND key=?",
+                (player, char_id, key)).fetchone()
+            try:
+                return int(got[0]) if got else default
+            except (TypeError, ValueError):
+                return default
+        now_aff, now_trust = cur("affection", start_aff), cur("trust",
+                                                                start_trust)
+        new_aff = min(now_aff, aff)
+        new_trust = min(now_trust, max(start_trust, trust_cap))
+        if new_aff == now_aff and new_trust == now_trust:
+            continue
+        for key, value in (("affection", new_aff), ("trust", new_trust)):
+            con.execute(
+                "INSERT INTO state(player,char,key,value) VALUES(?,?,?,?) "
+                "ON CONFLICT(player,char,key) DO UPDATE SET "
+                "value=excluded.value", (player, char_id, key, str(value)))
+        con.execute(
+            "INSERT INTO ledger(player,char,ts,kind,delta_lcl,delta_aff,"
+            "reason,session_id) VALUES(?,?,?,?,?,?,?,?)",
+            (player, char_id, now(), "correction", 0, new_aff - now_aff,
+             f"커밋으로 쌓인 자동 호감 회수 · 신뢰 {now_trust}→{new_trust}",
+             ""))
+
+
 def init(con: sqlite3.Connection, *, with_characters: bool = None) -> None:
     """스키마를 맞추고 기본값을 채운다.
 
@@ -494,6 +585,8 @@ def init(con: sqlite3.Connection, *, with_characters: bool = None) -> None:
     _ensure_columns(con)
     _sanitize_stored_text(con)
     _upgrade_v5(con)
+    if ver < 6:
+        _upgrade_v6(con)          # 한 번만 — 판 승격과 함께
     for k, v in GLOBAL_DEFAULTS.items():
         con.execute(
             "INSERT OR IGNORE INTO state(player,char,key,value) VALUES(?,'',?,?)",

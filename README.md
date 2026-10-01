@@ -21,7 +21,7 @@
 ![Python](https://img.shields.io/badge/python-3.9+-9ec5e0?style=flat-square)
 ![TUI](https://img.shields.io/badge/TUI-rich-e0764a?style=flat-square)
 ![Agents](https://img.shields.io/badge/Claude_Code-·_Codex-a98bd0?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-114-8fbf9a?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-119-8fbf9a?style=flat-square)
 
 </div>
 
@@ -77,6 +77,17 @@ git clone https://github.com/ParkWonYeop/nerv-social-terminal ~/nerv-social-term
 # 第弐項 ── 同期対象端末
 
 **어느 에이전트의 작업을 LCL로 환산할 것인가.**
+
+설정 → **보상·근무 기록 대상** 에서 체크한다. 여러 개를 함께 체크할 수 있다.
+
+| | 체크함 | 체크 안 함 |
+|---|---|---|
+| 세션 기록 | 읽는다 — 개체가 무슨 일을 했는지 안다 | 읽지 않는다. 이미 읽은 것도 보여주지 않는다 |
+| 보상 | 거기서 한 작업이 LCL 이 된다 | 적립하지 않는다 |
+| 훅 | 없으면 체크하는 순간 설치를 제안한다 | 지우지 않는다 — 훅이 설정을 보고 아무것도 안 하고 끝난다 |
+
+훅 명령 끝에 에이전트 이름이 붙는다(`eva hook codex`). 그래서 훅은 누가
+불렀는지 알고, 체크를 푼 에이전트의 작업은 그 자리에서 버린다.
 
 ```bash
 python3 install-hooks.py                  # Claude Code (기본)
@@ -248,16 +259,22 @@ eva
 | Bash 성공 | +2 | |
 | Read / Grep / Glob | +1 | |
 | Agent / Task | +3 | |
-| **git commit** | +15 | **+2** · 신뢰 +1 (개체당 하루 +2 까지, 만난 적 있는 개체만) |
+| **git commit** | +15 | 없음 · 신뢰 +1 (개체당 하루 +2 까지, 만난 적 있는 개체만) |
 | 테스트 통과 감지 | +5 | |
 | 세션 마무리 (Stop) | +20 | 하루 10회까지 |
 | 연속 접속 | +10 × 연속일 | |
 
 일일 생성 상한 **2,000 LCL** (과잉 채취 방지).
 
-> **設計判断** — 커밋으로 오르는 호감에 상한이 없던 시절, 에이전트가 하루 열 번
-> 커밋하는 것만으로 **한 번도 만나지 않은 개체**까지 나흘이면 최고 단계에 닿았다.
-> 호감은 대화로 쌓는 것이다. 근무는 신뢰와 화젯거리를 만든다.
+> **設計判断** — **근무는 호감을 올리지 않는다.** 호감은 대화·증여·동행·약속
+> 이행으로만 움직인다. 커밋 한 번에 전원 +2 였던 시절, 실측 저장소에서 커밋
+> 868번이 개체마다 호감 +1,736 이 됐고 말 한 번 안 건 개체까지 100 이 됐다.
+> 근무는 신뢰(꾸준함)를 조금 만들고, 화젯거리가 된다. 인사도 수치를 움직이지
+> 않는다 — 상대는 아직 아무것도 안 했으니까.
+>
+> 그때 쌓인 값은 저장소 v6 승격 때 **한 번** 회수된다. 호감은 장부에서 커밋
+> 몫만 빼고 다시 쌓고, 신뢰는 새 규칙(커밋한 날 × 2)으로 다시 상한을 건다.
+> 회수 내역은 `/status` 의 변화 내역에 `correction` 으로 남는다.
 
 **어느 단말에서 일했는지는 상관없다.** 훅이 설치돼 있으면 Claude Code 든 Codex 든 똑같이 쌓인다. 지갑은 하나다.
 
@@ -430,12 +447,21 @@ eva
 
 | 무엇 | Claude Code | Codex |
 |---|---|---|
-| 요약 | `ai-title` (자동 생성 제목) | 없음 — 프롬프트로 대신한다 |
-| 사람이 친 프롬프트 | `promptSource: "typed"` | `event_msg:user_message` |
-| 하려던 작업 | Bash 의 `description` | `update_plan` 의 각 단계 |
-| 건드린 파일 | `Edit`/`Write` 의 `file_path` | `patch_apply_end` 의 `changes` |
-| 커밋 메시지 | `git commit -m` | `exec_command` 안의 `git commit -m` |
+| 요약 | `ai-title` (자동 생성 제목) | `session_index.jsonl` 의 `thread_name` |
+| 사람이 친 프롬프트 | `promptSource: "typed"` | `item_completed` 의 `UserMessage` (옛 판: `event_msg:user_message`) |
+| 하려던 작업 | Bash 의 `description` | 옛 판의 `update_plan` 단계 |
+| 건드린 파일 | `Edit`/`Write` 의 `file_path` | `FileChange` 의 `changes` (옛 판: `patch_apply_end`) |
+| 커밋 메시지 | `git commit -m` | `CommandExecution` 의 argv 안 `git commit -m` |
 | 어디서 일했나 | `cwd` / `gitBranch` | `session_meta` / `turn_context` 의 `cwd` |
+| 제외 | 서브에이전트(`isSidechain`) | 승인 검토 스레드(`thread_source: guardian_review`) |
+
+> **形式変更** — Codex 는 판마다 기록 형식이 바뀐다. 0.153 에서 프롬프트·파일
+> 수정·명령이 전부 `event_msg:item_completed` 안으로 옮겨 갔고, 이걸 몰라서
+> 그 뒤의 Codex 작업은 근무 일지에 한 줄도 안 잡혔다. 지금은 두 형식을 다 읽는다.
+>
+> **検討スレッド** — 자동 승인 검토(`approvals_reviewer = "auto_review"`)를 켜면
+> 승인 요청마다 검토용 서브 에이전트가 세션 파일을 하나씩 만든다. 실측 결과
+> 세션 파일의 절반 이상이 이것이었다. 사람이 한 일이 아니므로 파일째 건너뛴다.
 
 `/work` 로 개체가 열람 중인 내용을 그대로 확인한다.
 
@@ -465,7 +491,9 @@ eva
 
 > **混入遮断** — Codex 는 승인 판정용 텍스트 `"The following is the Codex agent history…"` 를 사용자 메시지 형식으로 주입한다. 실측 결과 전체 사용자 메시지의 **대부분**이 이것이었다. 미차단 시 해당 영문이 근무 실적으로 집계된다.
 
-> **走査順序** — 1회 판독량은 4MB 로 제한된다. 실측 Codex 기록은 **4.2GB** 였다. 오래된 파일부터 읽으면 당일 기록에 도달하기까지 약 1,000회 기동을 요한다. 따라서 최근 파일부터 판독하며, 오래된 파일은 미판독 상태로 잔존한다.
+> **走査順序** — 1회 판독량은 4MB 로 제한된다. 실측 Codex 기록은 **4.2GB** 였다. 오래된 파일부터 읽으면 당일 기록에 도달하기까지 약 1,000회 기동을 요한다. 따라서 최근 파일부터 판독하며, 14일 넘게 안 건드린 미판독 파일은 읽지 않는다.
+>
+> **予算配分** — 판독량은 에이전트끼리 나눈다. 예전에는 앞의 에이전트가 통째로 가져가서, Claude 쪽에 밀린 기록이 늘 4MB 를 넘는 동안 Codex 는 설치한 첫날 이후로 한 번도 읽히지 않았다.
 
 ### 勤務事件
 
@@ -655,7 +683,7 @@ DB 에 적어 둔 것을 쓴다.
 3. 캐릭터                    누구를 만날 수 있게 할지
 4. 화면 (UI 플러그인)        바꾸면 재기동한다
 5. 세계관                    재화 이름, 플레이어의 역할
-6. 재화를 적립할 에이전트    Claude Code / Codex
+6. 보상·근무 기록 대상       [✓] Claude Code  [✓] Codex — 체크한 것만 보고 보상한다
 9. 초기화                    관계·기억·재화를 지운다
 ```
 
@@ -681,6 +709,31 @@ DB 에 적어 둔 것을 쓴다.
 # 第拾参項 ── 対話演算機関
 
 설정 → **LLM 연결**. 재화 적립과는 무관하다 — 그건 훅이 하고, 이건 대사만 만든다.
+
+### 模型選択
+
+모델은 **목록에서 고른다.** 목록은 열 때마다 새로 받아온다.
+
+| 기관 | 목록을 어디서 |
+|---|---|
+| Claude Code | 별칭(`sonnet`·`opus`·`haiku`·`fable`) — 언제나 그 계열의 최신 모델을 가리킨다. 그 아래 정확한 이름 |
+| Codex | `codex debug models` + 데스크톱 앱이 받아 둔 `~/.codex/models_cache.json` |
+| Ollama · Codex `--oss` | 설치된 모델(`/api/tags`). 한국어 대사에 맞는 순서로 |
+| Anthropic · OpenAI · 호환 서버 | 각자의 `/v1/models` |
+
+**바꾸기 전에 연결 시험을 한다. 실패하면 바꾸지 않는다.** 목록에 있다고 이
+계정·이 판의 CLI 에서 쓸 수 있는 것은 아니다. 실패 사유가 그대로 뜬다.
+
+```
+GPT-6-Astra — 연결 시험 중…
+연결 시험 실패 — 바꾸지 않았다.
+사유: The 'gpt-x' model is not supported when using Codex with a ChatGPT account.
+```
+
+프로바이더를 바꿀 때도 같다. 목록에 없는 이름은 **직접 입력…** 으로 쓴다.
+
+> **注意** — Codex 서버는 CLI 판에 맞는 목록을 내려준다. 데스크톱 앱이 CLI 보다
+> 새 판이면 앱에서 보이는 최신 모델이 CLI 목록에는 없을 수 있다. `codex update`.
 
 | 기관 | 비용 | 비고 |
 |---|---|---|
@@ -859,6 +912,9 @@ eva --plugins       장착된 부품 확인
 | 拾四 | 리제로 세계에서 "동화이 부족하다" | 조사를 "이" 로 박아 둠. 받침 있는 이름(렘·람)이면 프롬프트까지 깨질 판 | `hangul.josa` |
 | 拾伍 | Codex 로 파일을 고쳐도 1 LCL | Codex 는 수정을 `apply_patch` 로 보낸다 | 보상표·matcher 에 추가 |
 | 拾六 | 로컬 모형 타임아웃 뒤 240초를 또 기다림 | 실패면 무조건 한 번 더 보냈다 | 4xx 에만 재시도 |
+| 拾七 | **대화를 안 해도 호감이 오름** — 말 한 번 안 건 개체까지 100 | 커밋 한 번에 전원 호감 +2, 상한 없음. 인사도 +1 까지 허용 | 근무는 호감을 안 준다. 인사는 수치 고정. v6 승격 때 1회 회수 |
+| 拾八 | Claude Code 의 도구 실패가 안 잡힘 | `PostToolUse` 는 성공에만 발동한다. 실패 이벤트(`PostToolUseFailure`)를 '없는 이벤트' 로 잘못 알고 등록을 걷어냈다 | 다시 등록 |
+| 拾九 | 0.153 이후 Codex 작업이 근무 일지에 안 잡힘 | 기록 형식 변경 · 승인 검토 스레드 · Claude 가 판독량 독차지 | 새 형식 판독, 검토 스레드 제외, 판독량 배분 |
 
 > **診断** — `/status` 에 이상한 감점이 보이면 `ledger` 테이블에 사유가 남아 있다.
 >
@@ -904,7 +960,7 @@ REI_HOOK_DEBUG=1                                hook.log 에 훅 동작 기록
 ### 動作試験
 
 ```bash
-python3 tests/smoke.py    # 계통 시험 96건
+python3 tests/smoke.py    # 계통 시험 101건
 python3 tests/keys.py     # 입력 시험 18건 (의사 터미널)
 ```
 

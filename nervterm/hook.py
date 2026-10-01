@@ -34,6 +34,31 @@ def _note(msg: str) -> None:
          always=True)
 
 
+def _agent_of(payload: dict) -> str:
+    """이 훅을 부른 에이전트. 설치기가 명령 끝에 적어 둔 이름이 먼저다
+    (`eva hook codex`). 옛 설치본에는 없으니 페이로드로 짐작한다."""
+    if len(sys.argv) > 2 and sys.argv[1] == "hook":
+        return sys.argv[2].strip().lower()
+    path = str(payload.get("transcript_path") or "")
+    if "/.codex/" in path:
+        return "codex"
+    if "/.claude/" in path:
+        return "claude"
+    return "codex" if "turn_id" in payload else "claude"
+
+
+def _enabled(agent: str) -> bool:
+    """설정 → '보상·근무 기록 대상' 에서 체크한 에이전트인가.
+
+    체크를 푼 에이전트에서 한 일은 적립하지 않는다 — 세션 기록도 읽지
+    않는다(work.py). 예전에는 그 설정이 기록 읽기만 정하고 훅은 설정과
+    무관하게 적립해서, 꺼도 보상이 계속 쌓였다.
+    """
+    from . import settings
+    table = settings.get("agents", {}) or {}
+    return bool(table.get(agent))
+
+
 def _locked(exc) -> bool:
     import sqlite3
     return (isinstance(exc, sqlite3.OperationalError)
@@ -115,10 +140,12 @@ def _run(payload: dict) -> None:
             economy.touch_activity(con)
             _debug("SessionEnd")
 
-        elif event == "Notification":
-            # 에이전트가 사람을 기다린다(권한 요청 등). 작업 실적은 아니다.
+        elif event in ("Notification", "PermissionRequest"):
+            # 에이전트가 사람을 기다린다 — Claude 는 Notification, Codex 는
+            # PermissionRequest. 작업 실적은 아니다. 아무것도 출력하지 않으므로
+            # Codex 는 평소 승인 흐름대로 간다.
             widget.quip(con, "notify")
-            _debug("Notification")
+            _debug(event)
 
 
 def main() -> int:
@@ -138,6 +165,11 @@ def main() -> int:
         payload = json.loads(raw)
     except Exception:
         return 0
+    try:
+        if not _enabled(_agent_of(payload)):
+            return 0
+    except Exception:                                         # noqa: BLE001
+        pass              # 설정을 못 읽으면 예전처럼 적립한다
     import time
     t0 = time.monotonic()
     try:

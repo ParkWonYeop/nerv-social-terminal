@@ -25,6 +25,12 @@ sys.path.insert(0, str(ROOT))
 _TMP = tempfile.mkdtemp(prefix="nerv-smoke-")
 os.environ["NERV_DATA"] = _TMP
 os.environ["REI_PLAYER"] = "smoketest"
+# 실제 에이전트 세션 기록도 읽지 않는다 — Game 을 만들면 근무 일지 스캔이
+# 돈다. 그게 ~/.claude · ~/.codex 의 진짜 기록을 시험 저장소로 끌고 왔다.
+os.environ["CODEX_HOME"] = str(Path(_TMP) / "codex-home")
+from nervterm import agents as _agents                         # noqa: E402
+_agents.ClaudeAgent.sessions_dir = (
+    lambda self: Path(_TMP) / "claude-projects")
 
 PASS, FAIL = [], []
 
@@ -1467,24 +1473,86 @@ def _():
 # ═══════════════════════════════════════════════════════════════════════
 #  경제 — 커밋 호감 상한
 # ═══════════════════════════════════════════════════════════════════════
-@check("경제 — 커밋 호감은 하루 상한, 만난 적 있는 사람에게만")
+@check("경제 — 커밋은 호감을 주지 않고, 신뢰만 하루 상한 안에서")
 def _():
     from nervterm import config, db, economy
     with db.session() as con:
         db.init(con)
         db.put(con, "met_count", 1, char="rei")
         db.put(con, "met_count", 0, char="asuka")
-        db.put(con, "cap_commit_aff", "", char="rei")
+        db.put(con, "cap_commit_trust", "", char="rei")
+        db.put(con, "trust", 20, char="rei")
+        db.put(con, "trust", 20, char="asuka")
         rei0 = db.geti(con, "affection", char="rei")
         asuka0 = db.geti(con, "affection", char="asuka")
         for _ in range(10):
             economy.on_tool(con, tool="Bash",
                             tool_input={"command": 'git commit -m "x"'},
                             tool_response="", ok=True)
-        eq(db.geti(con, "affection", char="rei") - rei0,
-           config.AFF_COMMIT_DAILY_MAX, "하루 상한을 넘었다")
-        eq(db.geti(con, "affection", char="asuka"), asuka0,
-           "안 만난 사람이 커밋으로 호감이 올랐다")
+        eq(db.geti(con, "affection", char="rei"), rei0,
+           "대화 없이 커밋만으로 호감이 올랐다")
+        eq(db.geti(con, "affection", char="asuka"), asuka0, "안 만난 사람")
+        eq(db.geti(con, "trust", char="rei"),
+           20 + config.TRUST_COMMIT_DAILY_MAX, "신뢰 하루 상한")
+        eq(db.geti(con, "trust", char="asuka"), 20, "안 만난 사람의 신뢰")
+
+
+@check("인사 — 상대가 아무것도 안 했으니 수치가 움직이지 않는다")
+def _():
+    from nervterm import characters, db, game, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("misato")
+        db.set_char(char.id)
+        before = {k: db.geti(con, k) for k in
+                  ("affection", "trust", "interest", "patience")}
+        db.put(con, "last_seen", db.now())        # 방치·회복이 끼지 않게
+        db.put(con, "patience_ts", db.now())
+        g = game.Game(con, char, offline=False, animate=False, headless=True)
+        _with_provider(_fake_provider({
+            "line": "어라~ 왔네?", "affection_delta": 3, "trust_delta": 5,
+            "interest_delta": 4, "patience_delta": 2}), g.greet)
+        after = {k: db.geti(con, k) for k in before}
+        eq(after, before, "인사만으로 수치가 움직였다 — 껐다 켜기로 올릴 수 있다")
+
+
+@check("v6 승격 — 커밋 몫만 빼고 다시 쌓는다, 두 번 돌아도 같다")
+def _():
+    from nervterm import db
+    with db.session() as con:
+        db.init(con)
+        p, c = "fixtest", "rei"
+        con.execute("DELETE FROM ledger WHERE player=?", (p,))
+        con.execute("DELETE FROM dialogue WHERE player=?", (p,))
+        for key, value in (("affection", 100), ("trust", 100)):
+            con.execute("INSERT OR REPLACE INTO state(player,char,key,value) "
+                        "VALUES(?,?,?,?)", (p, c, key, str(value)))
+        con.execute("INSERT INTO dialogue(player,char,ts,role,text,emotion,"
+                    "sess) VALUES(?,?,?,?,?,?,?)",
+                    (p, c, "2026-08-01T10:00:00", "rei", "…", "", "s"))
+        rows = [("commit", 2, "2026-08-01"), ("talk", 3, "2026-08-01"),
+                ("commit", 2, "2026-08-02"), ("neglect", -15, "2026-08-03"),
+                ("date", 4, "2026-08-04"), ("commit", 2, "2026-08-04")]
+        for kind, d, day in rows:
+            con.execute("INSERT INTO ledger(player,char,ts,kind,delta_lcl,"
+                        "delta_aff,reason) VALUES(?,?,?,?,0,?,?)",
+                        (p, c, f"{day}T12:00:00", kind, d, kind))
+        db._upgrade_v6(con)
+        get = lambda k: int(con.execute(
+            "SELECT value FROM state WHERE player=? AND char=? AND key=?",
+            (p, c, k)).fetchone()[0])
+        # 5 → +3 = 8 → -15 → 0(경계) → +4 = 4
+        eq(get("affection"), 4, "커밋 몫을 뺀 재계산")
+        eq(get("trust"), 10 + 3 * 2, "신뢰는 커밋한 날 × 하루 상한")
+        db._upgrade_v6(con)
+        eq(get("affection"), 4, "두 번 돌았더니 또 깎였다")
+        eq(con.execute("SELECT COUNT(*) FROM ledger WHERE player=? "
+                       "AND kind='correction'", (p,)).fetchone()[0], 1,
+           "회수 기록")
+        con.execute("DELETE FROM ledger WHERE player=?", (p,))
+        con.execute("DELETE FROM state WHERE player=?", (p,))
+        con.execute("DELETE FROM dialogue WHERE player=?", (p,))
 
 
 @check("경제 — Codex 의 apply_patch 도 파일 수정으로 친다")
@@ -1947,6 +2015,299 @@ def _():
                              prev_fail_streak=0, cwd=str(root / "src")), [],
            "하위 폴더를 새 저장소라 했다")
         eq(events.project_root(str(root / "src")), str(root), "뿌리 찾기")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Codex — 지금 판의 세션 기록, 승인 검토 스레드, 공평한 스캔 예산
+# ═══════════════════════════════════════════════════════════════════════
+@check("Codex — 지금 판(item_completed)에서 프롬프트·파일·커밋·제목을 뽑는다")
+def _():
+    from nervterm import agents
+    a = agents.get("codex")
+    ts = "2026-10-01T10:00:00Z"
+
+    def item(it):
+        return {"timestamp": ts, "type": "event_msg",
+                "payload": {"type": "item_completed", "item": it}}
+    kinds = lambda got: {k for _, _, k, _, _ in got}
+    true("prompt" in kinds(a.harvest(item(
+        {"type": "UserMessage", "content": [{"type": "text",
+                                             "text": "이거 고쳐줘"}]}), "s")),
+         "UserMessage")
+    eq(a.harvest(item({"type": "UserMessage", "content": [
+        {"type": "text", "text": "<environment_context> 주입"}]}), "s"), [],
+       "주입 텍스트를 실적으로 셌다")
+    got = a.harvest(item({"type": "FileChange", "status": "completed",
+                          "changes": {"/a/b/main.py": {}}}), "s")
+    eq([g[3] for g in got if g[2] == "file"], ["main.py"], "FileChange")
+    got = a.harvest(item({"type": "CommandExecution", "status": "completed",
+                          "command": ["/bin/zsh", "-lc",
+                                      'git commit -m "고쳤다"']}), "s")
+    eq([g[3] for g in got if g[2] == "commit"], ["고쳤다"], "CommandExecution")
+    eq(a.harvest(item({"type": "CommandExecution", "status": "failed",
+                       "command": ["git", "commit", "-m", "x"]}), "s"), [],
+       "실패한 명령을 커밋으로 셌다")
+    got = a.harvest({"id": "abc", "thread_name": "블로그 정리",
+                     "updated_at": ts}, "")
+    eq([(g[2], g[3], g[4]) for g in got], [("title", "블로그 정리", "abc")],
+       "session_index 제목")
+    got = a.harvest({"timestamp": ts, "type": "session_meta", "payload": {
+        "thread_source": "guardian_review", "parent_thread_id": "p",
+        "cwd": "/x"}}, "s")
+    eq([g[2] for g in got], [agents.SKIP_FILE], "승인 검토 스레드를 못 걸렀다")
+
+
+@check("Codex — 스캔: 승인 검토 파일은 건너뛰고, Claude 가 예산을 독차지하지 않는다")
+def _():
+    import datetime
+    import uuid as _uuid
+    from nervterm import agents, db, settings, work
+    base = Path(_TMP) / "scan-fair"
+    shutil_rm = __import__("shutil").rmtree
+    shutil_rm(base, ignore_errors=True)
+    codex_home = base / "codex"
+    day_dir = codex_home / "sessions" / "2026" / "10" / "01"
+    day_dir.mkdir(parents=True)
+    now_utc = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z")
+    user_id, guard_id = str(_uuid.uuid4()), str(_uuid.uuid4())
+
+    def write(sid, meta, items):
+        lines = [{"timestamp": now_utc, "type": "session_meta",
+                  "payload": meta}]
+        lines += [{"timestamp": now_utc, "type": "event_msg",
+                   "payload": {"type": "item_completed", "item": it}}
+                  for it in items]
+        (day_dir / f"rollout-2026-10-01T10-00-00-{sid}.jsonl").write_text(
+            "\n".join(json.dumps(x, ensure_ascii=False) for x in lines)
+            + "\n", encoding="utf-8")
+    write(user_id, {"thread_source": "user", "cwd": "/x/codexproj"},
+          [{"type": "UserMessage",
+            "content": [{"type": "text", "text": "코덱스로 한 일"}]}])
+    write(guard_id, {"thread_source": "guardian_review",
+                     "parent_thread_id": user_id, "cwd": "/x"},
+          [{"type": "UserMessage",
+            "content": [{"type": "text", "text": "검토 스레드의 말"}]}])
+    (codex_home / "session_index.jsonl").write_text(json.dumps(
+        {"id": user_id, "thread_name": "코덱스 스레드 제목",
+         "updated_at": now_utc}, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    # Claude 쪽에는 예산보다 큰 밀린 기록
+    claude_dir = base / "claude" / "proj"
+    claude_dir.mkdir(parents=True)
+    filler = json.dumps({"type": "system", "text": "x" * 900}) + "\n"
+    (claude_dir / "big.jsonl").write_text(filler * 6000, encoding="utf-8")
+
+    claude = agents.get("claude")
+    claude.sessions_dir = lambda: base / "claude"
+    old_codex = os.environ.get("CODEX_HOME")
+    os.environ["CODEX_HOME"] = str(codex_home)
+    settings.put("agents.codex", True)
+    try:
+        with db.session() as con:
+            db.init(con)
+            con.execute("DELETE FROM work_facts WHERE player=?", (db.PLAYER,))
+            work.scan(con, budget=2_000_000)
+            texts = {r["text"] for r in con.execute(
+                "SELECT text FROM work_facts WHERE player=? AND agent='codex'",
+                (db.PLAYER,))}
+            true("코덱스로 한 일" in texts,
+                 "Claude 가 예산을 다 써서 Codex 를 못 읽었다")
+            true("검토 스레드의 말" not in texts, "승인 검토 스레드를 읽었다")
+            skipped = con.execute(
+                "SELECT skip FROM work_scan WHERE path LIKE ?",
+                (f"%{guard_id}%",)).fetchone()
+            eq(skipped["skip"] if skipped else None, 1, "건너뛰기 표시")
+            titles = work._human_titles(con, db.today(), 10)
+            true("코덱스 스레드 제목" in titles, f"제목이 안 이어졌다: {titles}")
+    finally:
+        del claude.sessions_dir           # 클래스의 것(시험용 빈 폴더)으로
+        os.environ["CODEX_HOME"] = old_codex
+        settings.put("agents.codex", False)
+        shutil_rm(base, ignore_errors=True)
+
+
+@check("훅 — Claude Code 의 실패는 PostToolUseFailure 로 온다 (등록·처리)")
+def _():
+    import importlib.util
+    from nervterm import agents, db
+    spec = importlib.util.spec_from_file_location(
+        "_installhooks2", ROOT / "install-hooks.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    wanted = mod.wanted_for(agents.get("claude"))
+    true("PostToolUseFailure" in wanted, "실패 이벤트를 등록하지 않는다")
+    true(wanted["PostToolUseFailure"], "실패 이벤트에 도구 matcher 가 없다")
+    true("PermissionRequest" in mod.wanted_for(agents.get("codex")),
+         "Codex 승인 대기 이벤트")
+    with db.session() as con:
+        db.init(con)
+        fails0 = db.daily_row(con)["fails"]
+        db.put(con, "fail_streak", 0)
+    _hook({"hook_event_name": "PostToolUseFailure", "tool_name": "Bash",
+           "tool_input": {"command": "false"}, "session_id": "f"})
+    with db.session() as con:
+        eq(db.daily_row(con)["fails"], fails0 + 1, "실패를 못 셌다")
+        eq(db.geti(con, "fail_streak"), 1, "연속 실패")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  보상·근무 기록 대상 — 체크한 에이전트만
+# ═══════════════════════════════════════════════════════════════════════
+def _hook_as(agent_arg, payload):
+    import subprocess
+    cmd = [sys.executable, "-m", "nervterm", "hook"]
+    if agent_arg:
+        cmd.append(agent_arg)
+    subprocess.run(cmd, input=json.dumps(payload), text=True, cwd=str(ROOT),
+                   timeout=30, env={**os.environ})
+
+
+@check("보상 대상 — 체크를 푼 에이전트의 작업은 적립하지 않는다")
+def _():
+    from nervterm import db, settings
+    edit = {"hook_event_name": "PostToolUse", "tool_name": "Edit",
+            "tool_input": {}, "tool_response": {}, "session_id": "g"}
+    settings.put("agents.codex", False)
+    settings.put("agents.claude", True)
+    try:
+        with db.session() as con:
+            db.init(con)
+            # 앞 시험들이 오늘 적립 상한을 채웠을 수 있다
+            con.execute("UPDATE daily SET lcl=0 WHERE player=? AND day=?",
+                        (db.PLAYER, db.today()))
+            before = db.geti(con, "lcl")
+        _hook_as("codex", edit)
+        _hook_as(None, {**edit, "transcript_path":
+                        "/Users/x/.codex/sessions/2026/10/01/rollout-a.jsonl"})
+        with db.session() as con:
+            eq(db.geti(con, "lcl"), before, "체크를 푼 Codex 에서 적립됐다")
+        _hook_as("claude", edit)
+        with db.session() as con:
+            true(db.geti(con, "lcl") > before, "체크한 Claude 가 적립 안 됐다")
+            mid = db.geti(con, "lcl")
+        settings.put("agents.codex", True)
+        _hook_as("codex", edit)
+        with db.session() as con:
+            true(db.geti(con, "lcl") > mid, "다시 체크했는데 적립 안 됐다")
+    finally:
+        settings.put("agents.codex", False)
+
+
+@check("보상 대상 — 체크를 푼 에이전트의 기록은 캐릭터가 모른다")
+def _():
+    from nervterm import db, settings, work
+    with db.session() as con:
+        db.init(con)
+        day = db.today()
+        con.execute("DELETE FROM work_facts WHERE player=? AND day=?",
+                    (db.PLAYER, day))
+        for agent, text in (("claude", "클로드에서 한 일"),
+                            ("codex", "코덱스에서 한 일")):
+            con.execute("INSERT INTO work_facts(player,day,ts,kind,text,sid,"
+                        "agent) VALUES(?,?,?,?,?,?,?)",
+                        (db.PLAYER, day, db.now(), "prompt", text, "s", agent))
+        settings.put("agents.claude", True)
+        settings.put("agents.codex", False)
+        got = work.digest(con)
+        true("클로드에서 한 일" in got, "체크한 쪽 기록이 없다")
+        true("코덱스에서 한 일" not in got, "체크를 푼 쪽 기록이 실렸다")
+        settings.put("agents.codex", True)
+        true("코덱스에서 한 일" in work.digest(con), "다시 체크하면 돌아와야 한다")
+        settings.put("agents.codex", False)
+
+
+@check("훅 설치 — 명령 끝에 에이전트 이름을 붙인다")
+def _():
+    import importlib.util
+    from nervterm import agents
+    spec = importlib.util.spec_from_file_location(
+        "_installhooks3", ROOT / "install-hooks.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for aid in ("claude", "codex"):
+        cmd = mod.command_for(agents.get(aid))
+        true(cmd.endswith(f" hook {aid}"), f"{aid}: {cmd}")
+        true(agents.is_our_hook({"hooks": [{"command": cmd}]}),
+             "우리 훅으로 못 알아본다")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  모델 목록 · 연결 시험
+# ═══════════════════════════════════════════════════════════════════════
+@check("모델 목록 — Codex 의 두 목록을 합치고, 숨긴 것은 뺀다")
+def _():
+    from nervterm import llm
+    cli = {"models": [
+        {"slug": "gpt-a", "display_name": "A", "visibility": "list",
+         "priority": 5, "description": "옛것"},
+        {"slug": "review", "visibility": "hide", "priority": 1}]}
+    cache = {"models": [
+        {"slug": "gpt-new", "display_name": "New", "visibility": "list",
+         "priority": 1, "description": "최신"},
+        {"slug": "gpt-a", "display_name": "A", "visibility": "list",
+         "priority": 7}]}
+    got = llm.CodexCLI.parse_catalog(cli, cache, None)
+    eq([m[0] for m in got], ["gpt-new", "gpt-a"], "순서·중복·숨김")
+    eq(got[1][2], "옛것", "우선순위가 높은 쪽 설명")
+    names = [m[0] for m in llm.ClaudeCLI({}).catalog()]
+    for alias in ("sonnet", "opus", "haiku"):
+        true(alias in names, f"Claude 별칭 {alias} 가 없다")
+
+
+@check("모델 바꾸기 — 연결 시험이 실패하면 아무것도 안 바뀐다")
+def _():
+    from nervterm import db, llm, settings
+
+    class Picky(llm.Provider):
+        id = "picky"
+        label = "까다로운 것"
+        billing = llm.BILLING_NONE
+        default_model = "ok-model"
+
+        def complete(self, system, user, *, timeout=None, schema=None):
+            self.calls = 1
+            if self.model == "ok-model" or self.model == "good":
+                return '{"line": "들린다."}'
+            self.last_error = f"그런 모델 없음: {self.model}"
+            return None
+    llm.BY_ID["picky"] = Picky
+    before_provider = settings.get("llm.provider")
+    try:
+        with db.session() as con:
+            db.init(con)
+            ok, why = llm.switch(con, provider_id="picky", model="bad")
+            eq(ok, False, "안 되는 모델로 바뀌었다")
+            true("bad" in why, f"사유: {why}")
+            eq(settings.get("llm.provider"), before_provider,
+               "실패했는데 프로바이더가 바뀌었다")
+            eq((settings.get("llm.models", {}) or {}).get("picky"), None,
+               "실패했는데 모델이 저장됐다")
+            ok, line = llm.switch(con, provider_id="picky", model="good")
+            eq((ok, line), (True, "들린다."), "되는 모델")
+            eq(settings.get("llm.provider"), "picky", "프로바이더 저장")
+            eq(settings.get("llm.models", {})["picky"], "good", "모델 저장")
+    finally:
+        settings.put("llm.provider", before_provider)
+        llm.BY_ID.pop("picky", None)
+
+
+@check("연결 시험 — 안 되는 이유를 알려 준다")
+def _():
+    from nervterm import db, llm
+
+    class Broken(llm.Provider):
+        id = "broken"
+        label = "고장"
+        billing = llm.BILLING_NONE
+
+        def complete(self, system, user, *, timeout=None, schema=None):
+            return "이건 JSON 이 아니다"
+    with db.session() as con:
+        db.init(con)
+        ok, why = llm.check(con, Broken({}))
+        eq(ok, False, "JSON 이 아닌데 통과")
+        true("JSON" in why, f"사유: {why}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
