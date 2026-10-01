@@ -196,13 +196,15 @@ class BaseUI:
         items = []
         for row in sv.rows:
             mark = f"  (준 적 있음 ×{row.given})" if row.given else ""
+            reason = getattr(row, "reason", "")
             items.append(V.MenuItem(
                 key=row.key, label=row.name + mark,
                 value=f"{sv.currency_symbol} {row.price}",
-                tone="plain" if row.affordable else "dim",
-                disabled=not row.affordable,
-                disabled_reason=f"{sv.currency_symbol} {row.price} 필요 — "
-                                f"보유 {sv.currency_symbol} {sv.money}",
+                tone="plain" if row.affordable and not reason else "dim",
+                disabled=bool(reason) or not row.affordable,
+                disabled_reason=reason or (
+                    f"{sv.currency_symbol} {row.price} 필요 — "
+                    f"보유 {sv.currency_symbol} {sv.money}"),
                 note=f"이름: {row.key}",
                 payload=row))
         for row in sv.locked:

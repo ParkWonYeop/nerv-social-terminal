@@ -70,6 +70,7 @@ class Game:
         # 이번 접속이 시작될 때까지 인사에 쓴 근무 사건의 끝. 이번 접속
         # 동안에는 그 뒤의 사건을 계속 보여준다.
         self.event_floor = db.geti(con, "event_mark")
+        self._noted = set()        # 이번 접속에 이미 알린 것(예산·연결 실패)
         # 이번 접속 전에 마지막으로 찾아온 때. 찾아오는 순간 last_seen 은
         # 지금이 되므로, '그 뒤에 남들과 있었던 일' 은 이걸로 잰다.
         self.prev_seen = db.get(con, "last_seen")
@@ -254,6 +255,7 @@ class Game:
         before = characters.stage_of(self.char, db.geti(con, "affection"))[2]
         with db.tx(con):
             db.say(con, "rei", line, emotion, self.sess)
+            wanted, delta = delta, self.budget_affection(delta, kind)
             if delta:
                 economy.apply(con, aff=delta, kind=kind, reason=line[:60])
             moved = stance.apply_response(con, got, self.char)
@@ -277,9 +279,33 @@ class Game:
             self.push("sys", f"약속을 지켰다 — {moved['promise_kept']}  "
                              f"(신뢰 +{config.TRUST_KEPT_PROMISE})")
         self.note_stage(before)
+        if wanted > 0 and delta < wanted and "budget" not in self._noted:
+            self._noted.add("budget")
+            self.push("sys", "오늘은 여기까지 — 관계는 하루에 조금씩만 자란다.")
 
         self.remember_for_widget()
         self.redraw(animate=self.animate)
+
+    def budget_affection(self, delta: int, kind: str) -> int:
+        """오르는 호감을 하루 예산 안으로. 실제로 줄 양.
+
+        하루 AFF_DAILY_MAX, 그중 대화는 AFF_TALK_DAILY_MAX. 이야기는 빼 둔다 —
+        관계가 깊어져야 열리고 한 번뿐인 고비다. 깎이는 쪽은 그대로.
+        """
+        if delta <= 0 or kind == "episode":
+            return delta
+        con = self.con
+        room = config.AFF_DAILY_MAX - db.cap_used(con, "aff_day")
+        talky = kind in ("talk", "greet")
+        if talky:
+            room = min(room, config.AFF_TALK_DAILY_MAX
+                       - db.cap_used(con, "aff_talk"))
+        give = max(0, min(delta, room))
+        if give:
+            db.capped(con, "aff_day", give, config.AFF_DAILY_MAX)
+            if talky:
+                db.capped(con, "aff_talk", give, config.AFF_TALK_DAILY_MAX)
+        return give
 
     def note_stage(self, before: int) -> None:
         """단계가 올랐으면 알린다. 높은 단계는 남들도 알게 된다."""
@@ -306,7 +332,16 @@ class Game:
         got = llm.normalize(raw, clamp=clamp) if raw else None
         if got:
             return got
+        self.note_llm_failure()
         return persona.fallback_response(self.con, st, self.char)
+
+    def note_llm_failure(self) -> None:
+        """대사를 못 만들었다 — 사유가 바뀔 때마다 한 번 알린다."""
+        why = llm.LAST_FAILURE
+        if self.offline or not why or ("llm", why) in self._noted:
+            return
+        self._noted.add(("llm", why))
+        self.push("sys", f"대사 연결 실패 — {why}. 미리 써 둔 대사로 대신한다.")
 
     def _thinking(self):
         if self.offline:
@@ -625,12 +660,14 @@ class Game:
             raw = llm.ask(self.con, sysp, msg, offline=self.offline)
         got = llm.normalize(raw, clamp=clamp) if raw else None
         if not got:
+            self.note_llm_failure()
             narr, line, emo = persona.fallback(self.char, st.stage_idx)
             if setting and choices:
                 narr = setting.split(".")[0] + "."
+            # 사전 대사로는 수치를 안 움직인다 — 예전에는 +1 을 줘서 LLM 없이
+            # 데이트만 반복해도 호감이 올랐다
             got = persona.empty_response(
                 narr, line, emo,
-                affection_delta=0 if choices else 1,
                 choices=list(DEFAULT_CHOICES) if choices else [])
         elif choices and not got["choices"]:
             # 장면은 살리고 선택지만 기본값으로 채운다
@@ -650,9 +687,30 @@ class Game:
         return action
 
     # ── 데이트 ─────────────────────────────────────────────────────────
+    def date_block(self, key: str) -> str:
+        """지금 이 장소에 갈 수 없는 이유. 갈 수 있으면 ''.
+
+        같은 곳은 사흘에 한 번, 하루 두 번까지. 상한이 없으면 40 LCL 짜리
+        문병을 열 번 해서 호감·신뢰를 100 까지 올릴 수 있었다.
+        """
+        last = db.flag(self.con, f"date_last_{key}")
+        if last:
+            try:
+                ago = (_dt.date.today() - _dt.date.fromisoformat(last)).days
+            except ValueError:
+                ago = config.DATE_SPOT_COOLDOWN_DAYS
+            left = config.DATE_SPOT_COOLDOWN_DAYS - ago
+            if left > 0:
+                return (f"{'오늘' if ago == 0 else f'{ago}일 전에'} 다녀왔다 — "
+                        f"{left}일 뒤에 다시 갈 수 있다")
+        if db.cap_used(self.con, "dates") >= config.DATE_DAILY_MAX:
+            return f"오늘은 벌써 {config.DATE_DAILY_MAX}번 함께 나갔다 — 내일 다시"
+        return ""
+
     def date_view(self, st) -> V.ShopView:
         rows = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
-                          affordable=st.money >= v[1])
+                          affordable=st.money >= v[1],
+                          reason=self.date_block(k))
                 for k, v in catalog(self.char.dates, st.affection)]
         locked = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
                             locked=True)
@@ -688,12 +746,23 @@ class Game:
             ui.notice(f"{josa(nm, '은/는')} 아직 따라나서지 않을 것이다. "
                       f"(호감 {need} 필요)", "danger")
             return
+        blocked = self.date_block(key)
+        if blocked:
+            self.page()
+            ui.notice(f"{name} — {blocked}.", "danger")
+            return
         if self._refused(need, name, st.currency_name):
             return
         if not self._pay(st, price, "date", name):
             return
 
-        social.log(self.con, self.char.id, "date", key, name)
+        con = self.con
+        with db.tx(con):
+            db.capped(con, "dates", 1, config.DATE_DAILY_MAX)
+            db.flag(con, f"date_last_{key}", _dt.date.today().isoformat())
+            visits = int(db.flag(con, f"date_count_{key}") or 0) + 1
+            db.flag(con, f"date_count_{key}", visits)
+            social.log(con, self.char.id, "date", key, name)
         self.push("sys", f"──  {name}  ──  데이트  "
                          f"({st.currency_symbol} -{price})")
         kept = self._kept_note("date", key)
@@ -714,15 +783,19 @@ class Game:
         # 2막: 판정
         # line 은 모델이, action 은 사용자가 쓴 텍스트 — 대괄호·개행을
         # 지워 [장소] 같은 구획 헤더를 위조하지 못하게 하고 넣는다.
+        repeat = visits > 1
         msg2 = (f"[장소] {name}\n{setting}\n\n"
                 f"[방금 {josa(nm, '이/가')} 한 말] "
                 f"{llm.inline_text(got['line'])}\n"
                 f"[상대가 고른 행동] {llm.inline_text(action)}\n\n"
                 f"이 행동에 대한 {nm}의 반응을 쓰라. 데이트의 마무리 장면이다.\n"
-                f"행동이 진심이고 {josa(nm, '을/를')} 향한 것이면 크게 마음이 "
-                f"움직인다(+4~+8). 무난하면 +1~+3. 성의 없거나 "
-                f"{josa(nm, '을/를')} 도구 취급하면 음수(-5까지).")
-        got2 = self._scene(st, msg2, clamp=8, choices=False)
+                + (f"이미 {visits}번째 오는 곳이다. 처음만큼 마음이 움직이지는 "
+                   "않는다(+1~+3).\n" if repeat else
+                   f"행동이 진심이고 {josa(nm, '을/를')} 향한 것이면 크게 마음이 "
+                   "움직인다(+4~+8). 무난하면 +1~+3.\n")
+                + f"성의 없거나 {josa(nm, '을/를')} 도구 취급하면 음수(-5까지).")
+        got2 = self._scene(st, msg2, choices=False,
+                           clamp=config.DATE_REPEAT_CLAMP if repeat else 8)
         recall.remember(self.con, "date",
                         f"{name}에 함께 갔다. 상대는 '{action}' 했다.", 2)
         self.speak(got2, kind="date")
@@ -854,14 +927,17 @@ class Game:
                     reason = "이미 함께 겪었다"
                 elif not opened:
                     reason = why
-                elif st.money < price:
+                elif (st.money < price
+                      and not db.flag(self.con, f"episode_paid_{k}")):
                     reason = (f"{st.currency_symbol} {price} 필요 — 보유 "
                               f"{st.currency_symbol} {st.money}")
                 else:
                     reason = ""
+                paid_k = bool(db.flag(self.con, f"episode_paid_{k}"))
                 menu.append(V.MenuItem(
                     key=k, label=title,
-                    value="완료" if done else f"{st.currency_symbol} {price}",
+                    value=("완료" if done else "이어서" if paid_k
+                           else f"{st.currency_symbol} {price}"),
                     disabled=bool(reason), disabled_reason=reason,
                     note=f"이름: {k}", payload=k))
             got = ui.choose(V.MenuView(
@@ -891,11 +967,17 @@ class Game:
             return
         if self._refused(need_aff, title, st.currency_name):
             return
-        if not self._pay(st, price, "episode", title):
-            return
+        paid = bool(db.flag(self.con, f"episode_paid_{key}"))
+        if not paid:
+            if not self._pay(st, price, "episode", title):
+                return
+            # 값을 치른 것을 기억한다 — 중간에 그만두고 다시 와도 또 받지 않는다
+            db.flag(self.con, f"episode_paid_{key}", db.now())
 
         nm = self.char.name
-        self.push("sys", f"──  {title}  ──  ({st.currency_symbol} -{price})")
+        self.push("sys", f"──  {title}  ──  " + (
+            "(이어서 — 이미 치렀다)" if paid else
+            f"({st.currency_symbol} -{price})"))
         self.redraw()
 
         # 1막
@@ -940,6 +1022,7 @@ class Game:
             clamp=8, choices=False)
         with db.tx(self.con):
             db.flag(self.con, f"episode_done_{key}", db.now())
+            db.flag(self.con, f"episode_paid_{key}", "")
             recall.remember(self.con, "event",
                             f"함께 겪은 일: {title}. 상대는 '{act1}', "
                             f"그리고 '{act2}' 했다.", 4)

@@ -110,6 +110,7 @@ class ShopRow:
     affordable: bool = True
     given: int = 0             # 선물만 — 준 횟수
     locked: bool = False
+    reason: str = ""           # 지금 못 고르는 이유(쿨다운 등). 있으면 잠긴다
 
 
 @dataclass

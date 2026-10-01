@@ -168,6 +168,12 @@ CREATE TABLE IF NOT EXISTS commits (
     ts     TEXT NOT NULL,
     PRIMARY KEY (player, hash)
 );
+-- 단말 앞에 있었던 시각(시 단위). '쉬겠다' 약속의 판정.
+CREATE TABLE IF NOT EXISTS activity (
+    player TEXT NOT NULL,
+    hour   TEXT NOT NULL,
+    PRIMARY KEY (player, hour)
+);
 -- 로컬 판독이 지켜보는 git 저장소와, reflog 를 어디까지 읽었나
 CREATE TABLE IF NOT EXISTS repos (
     player TEXT NOT NULL,
@@ -187,7 +193,8 @@ CREATE TABLE IF NOT EXISTS repos (
 # v6: 커밋으로 쌓인 자동 호감·신뢰 회수(1회), work_scan.skip
 # v7: 'root' 유령 플레이어(데몬 아래 getlogin) 를 실제 사용자로 합침,
 #     로컬 에이전트(git 커밋·ollama) 판독용 표
-SCHEMA_VERSION = 7
+# v8: 활동 시각(activity) 표
+SCHEMA_VERSION = 8
 
 # 전역 기본값 (char='')
 GLOBAL_DEFAULTS = {
@@ -650,7 +657,8 @@ def _merge_phantoms(con) -> None:
         # 관계(만난 적 없으니 커밋으로만 생긴 것)와 나머지는 버린다
         for table in ("state", "daily", "work_facts", "work_events",
                       "projects", "commits", "work_scan", "dialogue",
-                      "memory", "owned", "flags", "social", "repos"):
+                      "memory", "owned", "flags", "social", "repos",
+                      "activity"):
             con.execute(f"DELETE FROM {table} WHERE player=?", (ghost,))
         con.execute(
             "INSERT INTO ledger(player,char,ts,kind,delta_lcl,delta_aff,"
@@ -746,6 +754,39 @@ def bump(con, key: str, delta: int, lo=None, hi=None, char=None) -> int:
         {"p": PLAYER, "c": _ck(key, char), "k": key, "s": str(start),
          "d": delta, "lo": lo, "hi": hi})
     return geti(con, key, char=char)
+
+
+# ── 하루 상한 ──────────────────────────────────────────────────────────
+def cap_used(con, key: str, char=None) -> int:
+    """오늘 key 명목으로 이미 쓴 양. 상태에 'YYYY-MM-DD:n' 으로 적혀 있다."""
+    day, _, n = get(con, f"cap_{key}", char=char).partition(":")
+    return int(n) if day == today() and n.isdigit() else 0
+
+
+def capped(con, key: str, want: int, cap: int, char=None) -> int:
+    """오늘 key 명목으로 남은 만큼만 준다(want 가 양수일 때). 준 양.
+
+    날짜가 바뀌면 저절로 0 부터. 음수(깎는 것)는 그대로 통과한다 — 상한은
+    오르는 쪽에만 있다.
+    """
+    if want <= 0:
+        return want
+    used = cap_used(con, key, char)
+    give = max(0, min(want, cap - used))
+    if give:
+        put(con, f"cap_{key}", f"{today()}:{used + give}", char=char)
+    return give
+
+
+def mark_activity(con, when=None) -> None:
+    """이 시각(시 단위)에 단말 앞에 있었다. '쉬겠다' 약속을 판정할 때 본다.
+
+    장부(ledger)로 보면 하루 적립 상한을 넘긴 뒤의 작업이 안 보인다 —
+    적립이 0 이면 장부에 안 남는다. 그래서 따로, 시 단위로 적는다.
+    """
+    t = when or _dt.datetime.now()
+    con.execute("INSERT OR IGNORE INTO activity(player,hour) VALUES(?,?)",
+                (PLAYER, t.strftime("%Y-%m-%dT%H")))
 
 
 # ── 일일 집계 (전역 — 근무 기록) ───────────────────────────────────────
@@ -861,7 +902,8 @@ def reset_everything(con) -> None:
 def _wipe(con) -> None:
     for table in ("state", "ledger", "daily", "dialogue", "memory",
                   "owned", "flags", "work_scan", "work_facts",
-                  "work_events", "projects", "social", "commits", "repos"):
+                  "work_events", "projects", "social", "commits", "repos",
+                  "activity"):
         con.execute(f"DELETE FROM {table} WHERE player=?", (PLAYER,))
 
 

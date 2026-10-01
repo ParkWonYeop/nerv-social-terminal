@@ -131,15 +131,21 @@ def check_boring(con, text: str) -> str:
 TARGET = re.compile(r"^(?:(?:date|gift):[a-z0-9_-]{1,32}|visit|rest)$")
 
 
-def clean_target(raw: str, char=None) -> str:
-    """모델이 적은 이행 대상을 검증한다. 모르는 것은 '' (말로만)."""
+def clean_target(raw: str, char=None, affection: int = None) -> str:
+    """모델이 적은 이행 대상을 검증한다. 모르는 것은 '' (말로만).
+
+    affection 을 주면 지금 호감으로 갈 수 없는 곳·줄 수 없는 것도 '' 다 —
+    호감 20 에 '옛 도쿄 폐허(60)' 를 약속하면 지킬 길이 없어 감점만 확정된다.
+    """
     t = (raw or "").strip().lower().replace(" ", "")
     if not TARGET.match(t):
         return ""
     if char is not None and ":" in t:
         kind, key = t.split(":", 1)
-        table = char.dates if kind == "date" else char.gifts
-        if key not in (table or {}):
+        table = (char.dates if kind == "date" else char.gifts) or {}
+        if key not in table:
+            return ""
+        if affection is not None and affection < table[key][2]:
             return ""
     return t
 
@@ -189,9 +195,16 @@ def open_promises(con):
 
 
 def make_promise(con, text: str, target: str = "", char=None) -> int:
-    """약속을 남긴다. 새로 생겼으면 id. 이미 있던 약속이면 0."""
-    return recall.remember(con, "promise", text, weight=3,
-                           target=clean_target(target, char))
+    """약속을 남긴다. 새로 생겼으면 id. 이미 있던 약속이면 0.
+
+    '또 올게' 는 한 번에 하나만 — 매번 새로 만들면 3시간마다 지켜서
+    신뢰·호감을 받아 가는 길이 된다.
+    """
+    target = clean_target(target, char, db.geti(con, "affection"))
+    if target == "visit" and any(t == "visit" for _, _, t, _
+                                 in open_promises(con)):
+        return 0
+    return recall.remember(con, "promise", text, weight=3, target=target)
 
 
 def _set_status(con, pid: int, status: str) -> None:
@@ -199,21 +212,36 @@ def _set_status(con, pid: int, status: str) -> None:
                 (status, pid, db.PLAYER))
 
 
-def _kept(con, pid: int, text: str) -> None:
-    """지킨 약속 하나를 닫고 보상한다."""
+def _kept(con, pid: int, text: str) -> bool:
+    """지킨 약속 하나를 닫고 보상한다. 보상했으면 True.
+
+    보상은 하루 PROMISE_KEPT_DAILY_MAX 건까지. 넘으면 지킨 것으로만 남는다.
+    """
     _set_status(con, pid, "kept")
+    recall.remember(con, "event", f"상대가 약속을 지켰다: {text}", weight=3)
+    if not db.capped(con, "promise_kept", 1, config.PROMISE_KEPT_DAILY_MAX):
+        db.log(con, "promise_kept", 0, 0, f"지킨 약속(오늘 보상 끝): {text}")
+        return False
     move(con, "trust", config.TRUST_KEPT_PROMISE)
     db.bump(con, "affection", config.AFF_KEPT_PROMISE,
             lo=config.AFF_MIN, hi=config.AFF_MAX)
     db.log(con, "promise_kept", 0, config.AFF_KEPT_PROMISE,
            f"지킨 약속: {text}")
-    recall.remember(con, "event", f"상대가 약속을 지켰다: {text}", weight=3)
+    return True
 
 
-def _broken(con, pid: int, text: str, age: int) -> None:
+def _broken(con, pid: int, text: str, age: int, target: str = "") -> None:
+    """어긴 약속. 지킬 방법이 정해진 약속은 크게, 말로만 한 것은 작게.
+
+    말로만 한 약속은 지켰는지를 캐릭터가 대화로만 안다 — 실제로는 지켰는데
+    말을 안 꺼냈을 수도 있다. 흐지부지된 것으로 본다.
+    """
     _set_status(con, pid, "broken")
-    move(con, "trust", config.TRUST_BROKEN_PROMISE)
-    db.log(con, "promise_broken", 0, 0, f"{age}일 지난 약속: {text}")
+    hit = (config.TRUST_BROKEN_PROMISE if target
+           else config.TRUST_LAPSED_PROMISE)
+    move(con, "trust", hit)
+    db.log(con, "promise_broken", 0, 0,
+           f"{age}일 지난 약속(신뢰 {hit}): {text}")
 
 
 def fulfil(con, kind: str, key: str = "") -> list:
@@ -233,8 +261,8 @@ def fulfil(con, kind: str, key: str = "") -> list:
             hours = _age(row["ts"]) * 24 if row else 0
             if hours < config.PROMISE_VISIT_MIN_HOURS:
                 continue          # 방금 해 놓고 바로 지켰다고 하면 안 된다
-        _kept(con, pid, text)
-        done.append(text)
+        if _kept(con, pid, text):
+            done.append(text)
     return done
 
 
@@ -254,8 +282,7 @@ def keep_by_word(con, pid) -> str:
         (pid, db.PLAYER, db.CHAR)).fetchone()
     if row is None or row["target"]:
         return ""
-    _kept(con, pid, row["text"])
-    return row["text"]
+    return row["text"] if _kept(con, pid, row["text"]) else ""
 
 
 def _rest_window(ts: str):
@@ -294,20 +321,26 @@ def check_rest(con, now=None):
             continue
         if now < end:
             continue              # 아직 그 밤이 안 끝났다
+        # 활동 시각(시 단위)으로 본다. 장부만 보면 하루 적립 상한을 넘긴
+        # 뒤의 작업이 안 보인다(적립 0 이면 장부에 안 남는다).
         worked = con.execute(
-            "SELECT 1 FROM ledger WHERE player=? AND char='' AND kind='tool' "
-            "AND ts>=? AND ts<? LIMIT 1",
-            (db.PLAYER, start.isoformat(timespec="seconds"),
-             end.isoformat(timespec="seconds"))).fetchone()
+            "SELECT 1 FROM activity WHERE player=? AND hour>=? AND hour<? "
+            "LIMIT 1", (db.PLAYER, start.strftime("%Y-%m-%dT%H"),
+                        end.strftime("%Y-%m-%dT%H"))).fetchone() or \
+            con.execute(
+                "SELECT 1 FROM ledger WHERE player=? AND char='' "
+                "AND kind='tool' AND ts>=? AND ts<? LIMIT 1",
+                (db.PLAYER, start.isoformat(timespec="seconds"),
+                 end.isoformat(timespec="seconds"))).fetchone()
         if worked:
-            _broken(con, pid, text, age)
+            _broken(con, pid, text, age, "rest")
             recall.remember(con, "event",
                             f"쉬겠다고 해 놓고 새벽까지 일했다: {text}",
                             weight=3)
             broken.append(text)
         else:
-            _kept(con, pid, text)
-            kept.append(text)
+            if _kept(con, pid, text):
+                kept.append(text)
     return kept, broken
 
 
@@ -334,7 +367,7 @@ def settle_promises(con):
         if target == "rest":
             continue
         if age >= config.PROMISE_GRACE_DAYS:
-            _broken(con, pid, text, age)
+            _broken(con, pid, text, age, target)
             hit += 1
     for r in promises(con, status="broken", limit=50):
         if _age(r["ts"]) >= (config.PROMISE_GRACE_DAYS
@@ -357,7 +390,11 @@ def apply_response(con, got: dict, char=None):
             d = int(got.get(key, 0) or 0)
         except (TypeError, ValueError):
             d = 0
-        d = max(-8, min(8, d))
+        d = max(-config.AXIS_DOWN_MAX,
+                min(config.AXIS_UP_MAX.get(field, 2), d))
+        if field == "trust" and d > 0:
+            # 대화로 쌓는 신뢰도 하루 예산 안에서
+            d = db.capped(con, "trust_llm", d, config.TRUST_LLM_DAILY_MAX)
         if d:
             before = db.geti(con, field)
             out[field] = move(con, field, d) - before

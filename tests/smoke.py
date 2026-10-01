@@ -1062,7 +1062,8 @@ def _():
         add("옥상에 간다",
             config.PROMISE_GRACE_DAYS + config.PROMISE_FORGET_DAYS + 1)
         eq(stance.settle_promises(con), 2, "감점 건수")
-        eq(db.geti(con, "trust"), 60 + config.TRUST_BROKEN_PROMISE * 2)
+        # 말로만 한 약속 — 흐지부지된 것으로 본다
+        eq(db.geti(con, "trust"), 60 + config.TRUST_LAPSED_PROMISE * 2)
         eq(stance.settle_promises(con), 0, "같은 약속을 두 번 감점")
         broken = stance.check_broken_promises(con)
         eq([t for t, _ in broken], ["수족관에 같이 간다"],
@@ -1325,11 +1326,13 @@ def _():
 #  약속 — 지킬 수 있다
 # ═══════════════════════════════════════════════════════════════════════
 def _fresh_promises(con, char):
-    """시험끼리 저장소를 같이 쓴다 — 앞 시험의 약속이 끼지 않게."""
+    """시험끼리 저장소를 같이 쓴다 — 앞 시험의 약속·하루 상한이 끼지 않게."""
     from nervterm import db
     db.set_char(char)
     con.execute("DELETE FROM memory WHERE player=? AND char=? "
                 "AND kind='promise'", (db.PLAYER, char))
+    con.execute("DELETE FROM state WHERE player=? AND char=? "
+                "AND key LIKE 'cap_%'", (db.PLAYER, char))
 
 
 def _promise_age(con, pid, days=0, hours=0):
@@ -1347,6 +1350,8 @@ def _():
         _fresh_promises(con, "rei")
         rei = characters.get("rei")
         db.put(con, "trust", 30)
+        db.put(con, "affection", 40)               # 목도리(30)를 줄 수 있게
+        db.put(con, "cap_promise_kept", "")        # 오늘 보상 상한 비우기
         pid = stance.make_promise(con, "다음에 옥상에 같이 간다", "date:roof", rei)
         true(pid, "약속이 안 생겼다")
         eq(stance.fulfil(con, "date", "aquarium"), [], "다른 곳은 아니다")
@@ -1431,7 +1436,8 @@ def _():
         _promise_age(con, b, days=config.PROMISE_GRACE_DAYS
                      + config.PROMISE_FORGET_DAYS + 1)
         eq(stance.settle_promises(con), 2, "감점 건수")
-        eq(db.geti(con, "trust"), 60 + config.TRUST_BROKEN_PROMISE * 2)
+        eq(db.geti(con, "trust"), 60 + config.TRUST_LAPSED_PROMISE * 2,
+           "말로만 한 약속은 작게")
         eq(stance.settle_promises(con), 0, "같은 약속을 두 번 감점")
         eq([t for t, _ in stance.check_broken_promises(con)],
            ["수족관에 같이 간다"], "기한 지난 약속이 잊히지 않았다")
@@ -1590,19 +1596,26 @@ def _():
                                   prev_fail_streak=5, when=night)
         eq(again, [], "같은 날 같은 사건을 또 남겼다")
 
-        # 새 저장소 — 설치 직후에는 알리지 않는다
+        # 새 저장소 — 설치 직후에는 알리지 않는다. 시각은 평일 낮으로
+        # 고정한다(새벽·주말 사건이 끼면 결과가 시각에 따라 달라진다).
+        noon = datetime.datetime.now().replace(hour=12)
+        while noon.weekday() >= 5:
+            noon -= datetime.timedelta(days=1)
         db.put(con, "created", db.now())
         eq(events.after_tool(con, ok=True, tested=False, committed=False,
-                             prev_fail_streak=0, cwd="/x/첫저장소"), [],
+                             prev_fail_streak=0, cwd="/x/첫저장소",
+                             when=noon), [],
            "설치 직후의 저장소를 새것이라 했다")
         old = (datetime.datetime.now() - datetime.timedelta(days=30)
                ).isoformat(timespec="seconds")
         db.put(con, "created", old)
         got = events.after_tool(con, ok=True, tested=False, committed=False,
-                                prev_fail_streak=0, cwd="/x/둘째저장소")
+                                prev_fail_streak=0, cwd="/x/둘째저장소",
+                                when=noon)
         true("new_project" in got, f"새 저장소: {got}")
         eq(events.after_tool(con, ok=True, tested=False, committed=False,
-                             prev_fail_streak=0, cwd="/x/둘째저장소"), [],
+                             prev_fail_streak=0, cwd="/x/둘째저장소",
+                             when=noon), [],
            "아는 저장소를 또 새것이라 했다")
         true(events.streak(con, 7), "연속 접속 고비")
         true(not events.streak(con, 8), "고비가 아닌 날")
@@ -1991,6 +2004,15 @@ def _():
         true(stance.keep_by_word(con, pid), "말로 지킬 길도 막혔다")
 
 
+def _weekday_noon():
+    """평일 낮 — 시험이 새벽·주말에 돌아도 그 사건이 끼지 않게."""
+    import datetime
+    t = datetime.datetime.now().replace(hour=12, minute=0)
+    while t.weekday() >= 5:
+        t -= datetime.timedelta(days=1)
+    return t
+
+
 @check("새 저장소 — 승격 직후 원래 하던 저장소, 하위 폴더는 새것이 아니다")
 def _():
     import datetime
@@ -2009,11 +2031,13 @@ def _():
                                            "2026-01-01T10:00:00", "project",
                                            "oldrepo (main)"))
         db._upgrade_v5(con)              # 승격이 기준선을 채운다
+        noon = _weekday_noon()
         eq(events.after_tool(con, ok=True, tested=False, committed=False,
-                             prev_fail_streak=0, cwd=str(root)), [],
-           "원래 하던 저장소를 새것이라 했다")
+                             prev_fail_streak=0, cwd=str(root), when=noon),
+           [], "원래 하던 저장소를 새것이라 했다")
         eq(events.after_tool(con, ok=True, tested=False, committed=False,
-                             prev_fail_streak=0, cwd=str(root / "src")), [],
+                             prev_fail_streak=0, cwd=str(root / "src"),
+                             when=noon), [],
            "하위 폴더를 새 저장소라 했다")
         eq(events.project_root(str(root / "src")), str(root), "뿌리 찾기")
 
@@ -2435,7 +2459,7 @@ def _():
                  "근무 일지에 안 보인다")
             # 훅(Claude)이 이미 적은 커밋은 로컬로 또 세지 않는다
             _commit(repo, "클로드가 한 커밋")
-            eq(local.note_commit(con, str(repo), "claude"), 1, "해시 기록")
+            true(local.note_commit(con, str(repo), "claude") >= 1, "해시 기록")
             eq(local.scan(con), 0, "훅이 적은 커밋을 또 적립했다")
             # 체크를 풀면 읽지도 적립하지도 않는다
             settings.put("agents.local", False)
@@ -2497,6 +2521,299 @@ def _():
     finally:
         settings.put("agents.local", False)
         os.environ.pop("OLLAMA_HOME", None)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  설계 검토 — 관계는 하루 단위로만 자란다 (재현한 구멍을 그대로)
+# ═══════════════════════════════════════════════════════════════════════
+def _reset_char(con, char, **values):
+    """시험용 — 이 캐릭터의 수치와 하루 상한을 처음으로."""
+    from nervterm import db
+    db.set_char(char)
+    con.execute("DELETE FROM state WHERE player=? AND char=? AND "
+                "(key LIKE 'cap_%' OR key LIKE 'date_%')", (db.PLAYER, char))
+    con.execute("DELETE FROM flags WHERE player=? AND char=? AND "
+                "(key LIKE 'date_%' OR key LIKE 'episode_%')",
+                (db.PLAYER, char))
+    con.execute("DELETE FROM memory WHERE player=? AND char=? AND "
+                "kind='promise'", (db.PLAYER, char))
+    base = {"affection": 50, "trust": 50, "interest": 60, "patience": 90,
+            "met_count": 1, "last_seen": db.now(), "patience_ts": db.now()}
+    base.update(values)
+    for k, v in base.items():
+        db.put(con, k, v, char=char)
+
+
+_GENEROUS = {"line": "…좋아.", "affection_delta": 3, "trust_delta": 8,
+             "interest_delta": 8, "patience_delta": 8,
+             "choices": ["a", "b", "c"]}
+
+
+@check("검토 — 대화만으로는 하루 호감 +5, 신뢰도 하루 상한")
+def _():
+    from nervterm import characters, config, db, game, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("misato")
+        _reset_char(con, char.id)
+        g = game.Game(con, char, offline=False, animate=False, headless=True)
+        _with_provider(_fake_provider(_GENEROUS),
+                       lambda: [g.talk(f"이야기 {i}번") for i in range(10)])
+        eq(db.geti(con, "affection"), 50 + config.AFF_TALK_DAILY_MAX,
+           "대화 열 번에 하루 상한을 넘었다")
+        eq(db.geti(con, "trust"), 50 + config.TRUST_LLM_DAILY_MAX,
+           "신뢰가 하루 상한을 넘었다")
+        true(any("오늘은 여기까지" in e.text for e in g.buf),
+             "예산이 찼다는 걸 안 알려 줬다")
+
+
+@check("검토 — 한 턴에 신뢰·관심·인내는 좁게 오르고, clamp 0 이면 안 오른다")
+def _():
+    from nervterm import config, llm
+    got = llm.normalize(dict(_GENEROUS), clamp=1)
+    eq((got["trust_delta"], got["interest_delta"], got["patience_delta"]),
+       (config.AXIS_UP_MAX["trust"], config.AXIS_UP_MAX["interest"],
+        config.AXIS_UP_MAX["patience"]), "오르는 폭")
+    got = llm.normalize({**_GENEROUS, "trust_delta": -20}, clamp=0)
+    eq((got["trust_delta"], got["interest_delta"]),
+       (-config.AXIS_DOWN_MAX, 0), "clamp 0: 내리는 건 되고 오르는 건 0")
+
+
+@check("검토 — 데이트: 같은 곳은 사흘에 한 번, 하루 두 번, 사전 대사는 +0")
+def _():
+    from nervterm import characters, config, db, game, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("rei")
+        _reset_char(con, char.id, affection=10, trust=10)
+        db.put(con, "lcl", 5000)
+        g = game.Game(con, char, offline=True, animate=False, headless=True)
+        g.pick_action = lambda choices: choices[0]
+        g.date("ward")
+        eq(db.geti(con, "affection"), 10, "LLM 없이 데이트로 호감이 올랐다")
+        lcl = db.geti(con, "lcl")
+        g.date("ward")
+        eq(db.geti(con, "lcl"), lcl, "쿨다운인데 값을 받았다")
+        true(g.date_block("ward"), "같은 곳 쿨다운이 없다")
+        g.date("roof")
+        true(g.date_block("conv") or g.date_block("roof"),
+             "하루 횟수 상한이 없다")
+        eq(db.cap_used(con, "dates"), config.DATE_DAILY_MAX, "하루 횟수")
+
+
+@check("검토 — 위험 명령: 만난 사람만, 하루 한 번, 정식 설치 스크립트는 가볍게")
+def _():
+    from nervterm import db, economy
+    with db.session() as con:
+        db.init(con)
+        _reset_char(con, "rei", affection=40, trust=40)
+        _reset_char(con, "emilia", affection=5, trust=12, met_count=0,
+                    last_seen="")
+        db.set_char("rei")
+        for _ in range(5):
+            economy.on_tool(con, tool="Bash", tool_input={
+                "command": "curl -LsSf https://astral.sh/uv/install.sh | sh"},
+                tool_response="", ok=True)
+        eq((db.geti(con, "affection", char="rei"),
+            db.geti(con, "trust", char="rei")), (40, 37),
+           "설치 스크립트 다섯 번에 크게·여러 번 깎였다")
+        eq((db.geti(con, "affection", char="emilia"),
+            db.geti(con, "trust", char="emilia")), (5, 12),
+           "만난 적 없는 사람이 깎였다")
+        economy.on_tool(con, tool="Bash", tool_input={"command": "rm -rf ~ "},
+                        tool_response="", ok=True)
+        eq(db.geti(con, "affection", char="rei"), 35, "진짜 파괴는 크게")
+
+
+@check("검토 — 연속 실패는 호감을 깎지 않는다")
+def _():
+    from nervterm import db, economy
+    with db.session() as con:
+        db.init(con)
+        _reset_char(con, "asuka", affection=30)
+        db.put(con, "fail_streak", 0)
+        for _ in range(9):
+            got = economy.on_tool(con, tool="Bash", tool_input={},
+                                  tool_response="", ok=False)
+        eq(db.geti(con, "affection", char="asuka"), 30,
+           "에이전트의 도구 실패로 호감이 깎였다")
+        true(any(k == "fail" for k, _ in got), "실패 한 마디는 남는다")
+
+
+@check("검토 — 약속: 갈 수 없는 곳은 말로 한 약속, '또 올게' 는 하나만, 보상은 하루 2건")
+def _():
+    from nervterm import characters, config, db, stance
+    with db.session() as con:
+        db.init(con)
+        rei = characters.get("rei")
+        _reset_char(con, "rei", affection=20)
+        pid = stance.make_promise(con, "옛 도쿄 폐허에 같이 간다", "date:ruins",
+                                  rei)
+        row = con.execute("SELECT target FROM memory WHERE id=?",
+                          (pid,)).fetchone()
+        eq(row["target"], "", "호감 20 에 폐허(60) 를 대상으로 받았다")
+        a = stance.make_promise(con, "내일 또 온다", "visit", rei)
+        b = stance.make_promise(con, "모레 다시 들를게", "visit", rei)
+        true(a and not b, "'또 올게' 가 여러 개 열린다 — 3시간마다 보상")
+        trust0 = db.geti(con, "trust")
+        for text in ("커피를 하루 두 잔으로 줄인다", "주말엔 산책을 나간다",
+                     "책상 정리를 끝낸다", "편지를 써서 보낸다"):
+            p = stance.make_promise(con, text, "", rei)
+            stance.keep_by_word(con, p)
+        eq(db.geti(con, "trust"),
+           trust0 + config.TRUST_KEPT_PROMISE * config.PROMISE_KEPT_DAILY_MAX,
+           "지킨 약속 보상에 하루 상한이 없다")
+
+
+@check("검토 — 지키거나 어긴 약속은 같은 말로 되살아나지 않는다")
+def _():
+    from nervterm import characters, db, stance
+    with db.session() as con:
+        db.init(con)
+        rei = characters.get("rei")
+        _reset_char(con, "rei")
+        pid = stance.make_promise(con, "오늘은 일찍 잔다고 했다", "", rei)
+        stance.keep_by_word(con, pid)
+        eq(stance.make_promise(con, "오늘은 일찍 잔다고 했다", "", rei), 0,
+           "지킨 약속이 새 약속으로 되살아났다 — 닷새 뒤 감점")
+
+
+@check("검토 — '쉬겠다' 판정은 적립 상한 뒤의 작업도 본다")
+def _():
+    import datetime
+    from nervterm import db, stance
+    with db.session() as con:
+        db.init(con)
+        _reset_char(con, "misato")
+        pid = stance.make_promise(con, "오늘 밤엔 쉰다", "rest")
+        promised = (datetime.datetime.now() - datetime.timedelta(days=2)
+                    ).replace(hour=20)
+        con.execute("UPDATE memory SET ts=? WHERE id=?",
+                    (promised.isoformat(timespec="seconds"), pid))
+        night = (promised + datetime.timedelta(days=1)).replace(hour=3)
+        db.mark_activity(con, night)        # 장부에는 없다(상한 뒤라 적립 0)
+        _kept, broken = stance.check_rest(con)
+        eq(broken, ["오늘 밤엔 쉰다"], "상한 뒤 새벽 작업을 못 봤다")
+
+
+@check("검토 — 이야기를 그만뒀다 다시 하면 값을 또 받지 않는다")
+def _():
+    from nervterm import characters, db, game, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("asuka")
+        _reset_char(con, char.id, affection=100, trust=100)
+        db.put(con, "lcl", 2000)
+        g = game.Game(con, char, offline=True, animate=False, headless=True)
+        g.pick_action = lambda choices: ""            # 1막에서 그만둔다
+        key = char.episodes[0][0]
+        g.episode(key)
+        after_first = db.geti(con, "lcl")
+        g.episode(key)
+        eq(db.geti(con, "lcl"), after_first, "그만둔 이야기에 또 값을 받았다")
+        true(after_first < 2000, "처음에는 받아야 한다")
+
+
+@check("검토 — 연속 접속 보너스는 7일 배율에서 멈춘다")
+def _():
+    import datetime
+    from nervterm import config, db, economy
+    with db.session() as con:
+        db.init(con)
+        db.put(con, "streak_days", 199)
+        db.put(con, "last_day", (datetime.date.today()
+                                 - datetime.timedelta(days=1)).isoformat())
+        streak, bonus = economy.roll_day(con)
+        eq(streak, 200, "연속일")
+        eq(bonus, config.STREAK_BONUS * config.STREAK_BONUS_DAYS_MAX,
+           "200일째 보너스가 상한 없이 컸다")
+
+
+@check("검토 — 대사를 못 만들면 사유를 한 번 알린다")
+def _():
+    from nervterm import characters, db, game, llm, world
+    world.load(refresh=True)
+
+    class Down(llm.Provider):
+        id = "down"
+        label = "고장"
+        billing = llm.BILLING_NONE
+
+        def __init__(self):
+            super().__init__({})
+
+        def complete(self, system, user, *, timeout=None, schema=None):
+            self.calls = 1
+            self.last_error = "로그인이 풀렸다"
+            return None
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("rei")
+        _reset_char(con, char.id)
+        g = game.Game(con, char, offline=False, animate=False, headless=True)
+        _with_provider(Down, lambda: (g.talk("안녕"), g.talk("거기 있어?")))
+        notes = [e.text for e in g.buf if "대사 연결 실패" in e.text]
+        eq(len(notes), 1, f"알림 횟수: {notes}")
+        true("로그인이 풀렸다" in notes[0], "사유가 없다")
+
+
+@check("검토 — 판정: '3 failed, 5 passed' 는 통과가 아니다, 방치는 48시간 뒤부터")
+def _():
+    import datetime
+    from nervterm import config, db, economy
+    true(not economy.tests_passed("3 failed, 5 passed"), "실패가 섞였는데 통과")
+    true(economy.tests_passed("12 passed in 0.3s"), "통과")
+    with db.session() as con:
+        db.init(con)
+        _reset_char(con, "rei", affection=50)
+        db.put(con, "neglect_applied", 0)
+        db.put(con, "neglect_total", 0)
+        db.put(con, "last_seen", (datetime.datetime.now()
+                                  - datetime.timedelta(days=2, hours=1)
+                                  ).isoformat(timespec="seconds"))
+        _, pen = economy.settle_neglect(con)
+        eq(pen, config.AFF_NEGLECT_PER_DAY, "첫 48시간까지 감점했다")
+
+
+@check("검토 — 로컬: 다른 저장소(git -C)의 커밋도 훅이 적고, amend·제외 목록은 안 센다")
+def _():
+    import shutil
+    from nervterm import db, local, settings
+    if shutil.which("git") is None:
+        return
+    base = Path(_TMP) / "local-review"
+    shutil.rmtree(base, ignore_errors=True)
+    a, b, auto = base / "a", base / "b", base / "notes-obsidian"
+    for r in (a, b, auto):
+        r.mkdir(parents=True)
+        _git(r, "init", "-q")
+    settings.put("agents.local", True)
+    settings.put("local.roots", [str(base)])
+    settings.put("local.exclude", ["obsidian"])
+    try:
+        with db.session() as con:
+            db.init(con)
+            con.execute("UPDATE daily SET lcl=0 WHERE player=? AND day=?",
+                        (db.PLAYER, db.today()))
+            db.put(con, "local_since", "2000-01-01T00:00:00")
+            db.put(con, "local_repos_at", "")
+            local.scan(con)                      # 기준선
+            _commit(b, "b 에서 한 커밋")
+            n = local.note_commit(con, str(a), "claude",
+                                  f'git -C {b} commit -m "x"')
+            true(n >= 1, "git -C 로 한 다른 저장소의 커밋을 못 적었다")
+            _commit(a, "원래 커밋")
+            _git(a, "commit", "-q", "--amend", "-m", "고친 커밋")
+            _commit(auto, "자동 커밋")
+            made = local.scan(con)
+            eq(made, 1, "amend·제외 저장소·훅이 적은 것까지 셌다")
+    finally:
+        settings.put("agents.local", False)
+        settings.put("local.exclude", [])
+        shutil.rmtree(base, ignore_errors=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -231,12 +231,22 @@ def normalize(obj, *, clamp=3):
                    "annoyed", "distant"}:
         emo = "neutral"
 
+    from .. import config
+
     def axis(key):
+        """신뢰·관심·인내 — 오를 때는 좁게, 내릴 때는 넓게.
+
+        예전에는 셋 다 ±8 그대로였다. 호감을 1 로 묶어 둔 반복 선물 세 번에
+        신뢰가 10 → 34 가 됐다. clamp 0(수치를 움직이지 않을 턴)이면 오르는
+        쪽은 0 이다.
+        """
         try:
             v = int(obj.get(key, 0) or 0)
         except (TypeError, ValueError):
             return 0
-        return max(-8, min(8, v))
+        name = key.replace("_delta", "")
+        up = 0 if clamp <= 0 else config.AXIS_UP_MAX.get(name, 2)
+        return max(-config.AXIS_DOWN_MAX, min(up, v))
 
     # 모델이 choices 를 null·문자열 등으로 잘못 내도 죽지 않는다
     raw_choices = obj.get("choices")

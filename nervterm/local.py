@@ -17,6 +17,7 @@
 """
 import datetime as _dt
 import os
+import re
 import time
 from pathlib import Path
 
@@ -46,6 +47,16 @@ def enabled() -> bool:
 def roots() -> list:
     got = settings.get("local.roots") or ["~"]
     return [str(Path(r).expanduser()) for r in got if str(r).strip()]
+
+
+def excluded(path: str) -> bool:
+    """지켜보지 않을 저장소 — 경로에 이 글자가 들어가면 뺀다.
+
+    자동으로 커밋하는 도구(Obsidian Git, etckeeper, dotfiles 동기화…)는
+    사람이 아무것도 안 해도 커밋을 만든다. 그게 재화가 되면 안 된다.
+    """
+    pats = settings.get("local.exclude") or []
+    return any(str(p) and str(p) in path for p in pats)
 
 
 # ── git 을 실행하지 않고 읽는다 ────────────────────────────────────────
@@ -92,48 +103,63 @@ def is_commit(action: str) -> bool:
     return action == "commit" or action.startswith("commit (")
 
 
-def last_commit(repo: str, within: int = 180) -> str:
-    """이 저장소에서 방금(within 초 안) 만든 마지막 커밋 해시. 없으면 ''.
+def commits_since(repo: str, within: int = 90) -> list:
+    """이 저장소에서 방금(within 초 안) 만든 커밋 해시들. 훅이 쓴다.
 
-    훅이 쓴다. reflog 의 마지막 줄만 보면 안 된다 — `git commit && git
-    checkout …` 이면 마지막 줄은 checkout 이다. 그렇다고 최근 커밋을 전부
-    가져가면, 바로 전에 로컬 에이전트가 만든 커밋까지 '훅이 만든 것' 이 돼
-    영영 적립되지 않는다. 이 명령이 만든 마지막 커밋 하나만.
+    reflog 의 마지막 줄만 보면 안 된다 — `git commit && git checkout …` 이면
+    마지막 줄은 checkout 이고, 한 명령에서 커밋을 두 번 할 수도 있다. 창은
+    짧게(90초): 길면 바로 전에 로컬 에이전트가 만든 커밋까지 '훅이 만든 것'
+    이 돼 영영 적립되지 않는다.
     """
     path = _reflog(repo)
     if not path:
-        return ""
+        return []
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
-            f.seek(max(0, size - 8192))
-            tail = f.read().decode("utf-8", "replace").splitlines()[-20:]
+            f.seek(max(0, size - 16384))
+            tail = f.read().decode("utf-8", "replace").splitlines()[-40:]
     except OSError:
-        return ""
+        return []
     now = time.time()
-    for line in reversed(tail):
-        got = parse_reflog_line(line)
-        if got and is_commit(got[2]) and now - got[1] <= within:
-            return got[0]
-    return ""
+    return [got[0] for got in map(parse_reflog_line, tail)
+            if got and is_commit(got[2]) and now - got[1] <= within]
 
 
-def note_commit(con, cwd: str, source: str) -> int:
+_GIT_C = re.compile(r"""\bgit\s+-C\s+(?:"([^"]+)"|'([^']+)'|(\S+))""")
+_CD = re.compile(r"""(?:^|[;&|]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))""")
+
+
+def repos_in(cwd: str, command: str = "") -> list:
+    """명령이 커밋했을 수 있는 저장소들 — 작업 디렉터리 + `git -C 경로` ·
+    `cd 경로` 로 옮겨 간 곳. 다른 저장소에서 한 커밋을 놓치면 로컬 판독이
+    그걸 또 적립한다."""
+    from .events import project_root
+    base = cwd or os.getcwd()
+    dirs = [base]
+    for rx in (_GIT_C, _CD):
+        for m in rx.finditer(command or ""):
+            raw = next(g for g in m.groups() if g)
+            path = os.path.expanduser(raw)
+            dirs.append(path if os.path.isabs(path)
+                        else os.path.normpath(os.path.join(base, path)))
+    return list(dict.fromkeys(project_root(d) for d in dirs if d))
+
+
+def note_commit(con, cwd: str, source: str, command: str = "") -> int:
     """훅이 커밋을 봤다 — 그 커밋 해시를 '어디서 만든 것' 과 함께 적는다.
 
     체크를 푼 에이전트의 커밋도 적는다. 안 적으면 로컬 판독이 그걸 '로컬에서
     한 일' 로 잘못 알고 적립한다.
     """
-    from .events import project_root
-    if not cwd:
-        return 0
-    h = last_commit(project_root(cwd))
-    if not h:
-        return 0
-    return con.execute(
-        "INSERT OR IGNORE INTO commits(player,hash,source,ts) "
-        "VALUES(?,?,?,?)", (db.PLAYER, h, source, db.now())).rowcount
+    n = 0
+    for repo in repos_in(cwd, command):
+        for h in commits_since(repo):
+            n += con.execute(
+                "INSERT OR IGNORE INTO commits(player,hash,source,ts) "
+                "VALUES(?,?,?,?)", (db.PLAYER, h, source, db.now())).rowcount
+    return n
 
 
 # ── 저장소 찾기 ────────────────────────────────────────────────────────
@@ -145,7 +171,8 @@ def find_repos(bases, *, depth=MAX_DEPTH, cap=MAX_REPOS) -> list:
         path, level = stack.pop()
         seen += 1
         if os.path.exists(os.path.join(path, ".git")):
-            found.append(path)
+            if not excluded(path):
+                found.append(path)
             continue
         if level >= depth:
             continue
@@ -198,6 +225,8 @@ def scan(con) -> int:
     made = 0
     for row in con.execute("SELECT path,offset,mtime FROM repos WHERE player=?",
                            (db.PLAYER,)).fetchall():
+        if excluded(row["path"]):
+            continue
         made += _scan_repo(con, row["path"], row["offset"], row["mtime"],
                            since_epoch)
     return made
@@ -241,7 +270,9 @@ def _scan_repo(con, repo, offset, mtime, since_epoch) -> int:
     with db.tx(con):
         for line in blob.decode("utf-8", "replace").splitlines():
             got = parse_reflog_line(line)
-            if not got or not is_commit(got[2]) or got[1] < since_epoch:
+            # amend 는 새 일이 아니다 — 고칠 때마다 커밋 값을 받으면 안 된다
+            if (not got or not is_commit(got[2]) or got[2] == "commit (amend)"
+                    or got[1] < since_epoch):
                 continue
             h, epoch, _action, message = got
             fresh = con.execute(
@@ -262,6 +293,7 @@ def _reward(con, repo_name: str, message: str, epoch: int) -> None:
     when = _dt.datetime.fromtimestamp(epoch)
     day, ts = when.date().isoformat(), when.isoformat(timespec="seconds")
     db.daily_bump(con, "commits", 1, day=day)
+    db.mark_activity(con, when)
     economy.apply(con, lcl=LOCAL_COMMIT_LCL, kind="local_commit",
                   reason=f"{repo_name}: {message[:60]}")
     # 꾸준함은 신뢰를 조금 — 하루 상한 안에서, 만난 사람에게만(호감은 없다)

@@ -158,6 +158,11 @@ def budget_left(con) -> int:
     return min(plan_left, guard.budget_left(con))
 
 
+# 마지막 llm.ask 가 대사를 못 만든 이유. 게임이 화면에 한 번 알린다 —
+# 조용히 사전 작성 대사로 떨어지면 고장인지 아닌지 알 수가 없다.
+LAST_FAILURE = ""
+
+
 # ── 한 턴 ──────────────────────────────────────────────────────────────
 def ask(con, system, user: str, *, offline: bool = False,
         timeout: int = None, schema: dict = None):
@@ -168,14 +173,18 @@ def ask(con, system, user: str, *, offline: bool = False,
 
     성공하면 dict, 못 쓰면 None(→ 호출부가 폴백 대사 사용).
     """
+    global LAST_FAILURE
+    LAST_FAILURE = ""
     if offline:
         return None
 
     provider = current()
-    ok, _why = provider.available()
+    ok, why = provider.available()
     if not ok:
+        LAST_FAILURE = why
         return None
     if budget_left(con) <= 0:
+        LAST_FAILURE = "오늘 대사 생성 상한을 다 썼다"
         return None
 
     # 응답을 기다리는 동안(수 초~수 분) 쓰기 락을 쥐고 있으면 안 된다.
@@ -200,5 +209,9 @@ def ask(con, system, user: str, *, offline: bool = False,
     con.commit()
 
     if text is None:
+        LAST_FAILURE = provider.last_error or "응답이 없다"
         return None
-    return extract_json(text)
+    got = extract_json(text)
+    if got is None:
+        LAST_FAILURE = "JSON 으로 답하지 않았다"
+    return got

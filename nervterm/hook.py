@@ -78,7 +78,7 @@ def _remember_commit_only(payload: dict) -> None:
         with db.session(write=True) as con:
             db.init(con, with_characters=False)
             local.note_commit(con, str(payload.get("cwd") or ""),
-                              _agent_of(payload))
+                              _agent_of(payload), cmd)
     except Exception as exc:                                  # noqa: BLE001
         _note(f"commit-only ERROR {type(exc).__name__}: {exc}")
 
@@ -145,7 +145,9 @@ def _run(payload: dict) -> None:
                 # 이 커밋은 여기서 만든 것 — 로컬 판독이 또 세지 않게
                 from . import local
                 local.note_commit(con, str(payload.get("cwd") or ""),
-                                  _agent_of(payload))
+                                  _agent_of(payload),
+                                  str((ti if isinstance(ti, dict) else {})
+                                      .get("command", "")))
             kind = _quip_kind(results)
             if kind:
                 widget.quip(con, kind, force=(kind == "danger"))

@@ -8,10 +8,15 @@ from . import config, db, events, stance
 # 파일을 고치는 도구. Codex 는 apply_patch 라는 이름으로 보낸다.
 EDIT_TOOLS = ("Edit", "Write", "NotebookEdit", "apply_patch")
 
-_DANGER = [(re.compile(p, re.I), why) for p, why in config.DANGER_PATTERNS]
+_DANGER = [(re.compile(p, re.I), why, level)
+           for p, why, level in config.DANGER_PATTERNS]
 _TEST_OK = re.compile(
     r"\b(\d+\s+passed|all tests? passed|tests? ok|build succeeded|"
     r"0 failed|✓ \d+|PASS\b)", re.I)
+# 통과 표시가 있어도 실패가 섞이면 통과가 아니다 — "3 failed, 5 passed"
+_TEST_FAIL = re.compile(
+    r"\b[1-9]\d*\s+(?:failed|failing|errors?)\b|\bFAILED\b|\bFAIL\b|"
+    r"\b\d+\s+실패")
 # git 전역 옵션(-C path, -c key=val, --git-dir=…)을 지나 commit 에 닿아야 한다.
 # 'git log --grep commit' 처럼 하위 명령이 다른 것은 걸리지 않는다.
 _COMMIT = re.compile(
@@ -95,15 +100,26 @@ def strip_literals(cmd: str) -> str:
     return "".join(out)
 
 
-def check_danger(command: str):
-    """위험/이상한 명령이면 사유 문자열, 아니면 None."""
+def danger_of(command: str):
+    """위험/이상한 명령이면 (사유, 등급), 아니면 None."""
     if not command:
         return None
     bare = strip_literals(command)
-    for rx, why in _DANGER:
+    for rx, why, level in _DANGER:
         if rx.search(bare):
-            return why
+            return why, level
     return None
+
+
+def check_danger(command: str):
+    """위험/이상한 명령이면 사유 문자열, 아니면 None."""
+    got = danger_of(command)
+    return got[0] if got else None
+
+
+def tests_passed(output: str) -> bool:
+    text = output[:4000]
+    return bool(_TEST_OK.search(text)) and not _TEST_FAIL.search(text)
 
 
 def met(con, char) -> bool:
@@ -112,19 +128,8 @@ def met(con, char) -> bool:
 
 
 def capped(con, char, key: str, want: int, cap: int) -> int:
-    """오늘 이 캐릭터에게 key 명목으로 이미 준 양을 보고 남은 만큼만.
-
-    상태에 'YYYY-MM-DD:n' 으로 적어 둔다 — 날짜가 바뀌면 저절로 0.
-    """
-    if want <= 0:
-        return want
-    today = db.today()
-    day, _, n = db.get(con, f"cap_{key}", char=char).partition(":")
-    used = int(n) if day == today and n.isdigit() else 0
-    give = max(0, min(want, cap - used))
-    if give:
-        db.put(con, f"cap_{key}", f"{today}:{used + give}", char=char)
-    return give
+    """db.capped 의 옛 순서 — (con, char, key, want, cap)."""
+    return db.capped(con, key, want, cap, char=char)
 
 
 def on_tool(con, *, tool: str, tool_input: dict, tool_response, ok: bool,
@@ -136,16 +141,15 @@ def on_tool(con, *, tool: str, tool_input: dict, tool_response, ok: bool,
     """
     out = []
     db.daily_bump(con, "tools", 1)
+    db.mark_activity(con)
     prev_fail = db.geti(con, "fail_streak")
 
     if not ok:
         db.daily_bump(con, "fails", 1)
         streak = db.bump(con, "fail_streak", 1)
+        # 호감은 깎지 않는다 — 실패한 건 에이전트의 도구 호출이다. 실패
+        # 이벤트가 없는 Codex 와 형평도 맞지 않았다. 한 마디·사건으로만.
         if streak > 0 and streak % config.AFF_FAIL_STREAK == 0:
-            for c in db.known_chars(con):
-                apply(con, aff=config.AFF_FAIL_PENALTY, kind="fail_streak",
-                      reason=f"{streak}회 연속 도구 실패",
-                      session_id=session_id, char=c)
             out.append(("fail", f"{streak}회 연속 실패"))
         out += [("event", k) for k in events.after_tool(
             con, ok=False, tested=False, committed=False,
@@ -166,25 +170,35 @@ def on_tool(con, *, tool: str, tool_input: dict, tool_response, ok: bool,
     # 문서나 테스트 목록에 "git commit" 이라고 적은 것을 커밋으로 세면 안 된다.
     bare = strip_literals(cmd)
 
-    why = check_danger(cmd)
-    if why:
-        # 다들 같은 단말 기록을 본다 — 전원에게 반영
+    danger = danger_of(cmd)
+    if danger:
+        why, level = danger
+        aff, trust = config.DANGER_LEVELS.get(level, (0, 0))
         from . import recall
         events.danger(con, why)
+        # 같은 단말을 보지만, 서운하거나 실망할 수 있는 건 만난 사람뿐이다.
+        # 같은 사유는 캐릭터마다 하루 한 번 — 에이전트가 같은 설치 명령을
+        # 열 번 돌렸다고 열 번 깎이지 않는다.
         for c in db.known_chars(con):
-            apply(con, aff=config.AFF_DANGER_PENALTY, kind="danger",
-                  reason=why, session_id=session_id, char=c)
-            # 위험한 짓은 호감보다 신뢰를 더 크게 깎는다.
-            stance.move(con, "trust", config.TRUST_DANGER, char=c)
-            db.log(con, "danger_trust", 0, 0,
-                   f"신뢰 {config.TRUST_DANGER}: {why}", char=c)
+            if not met(con, c) or not db.capped(con, f"danger:{why}", 1, 1,
+                                                char=c):
+                continue
+            if aff:
+                apply(con, aff=aff, kind="danger", reason=why,
+                      session_id=session_id, char=c)
+            if trust:
+                stance.move(con, "trust", trust, char=c)
+                db.log(con, "danger_trust", 0, 0, f"신뢰 {trust}: {why}",
+                       char=c)
             db.flag(con, "last_danger", why, char=c)
             recall.remember(con, "fact",
                             f"상대가 위험한 명령을 실행했다: {why}",
-                            weight=3, char=c)
+                            weight=3 if level == "destroy" else 2, char=c)
         out.append(("danger", why))
 
-    committed = bool(bare and _COMMIT.search(bare))
+    # amend 는 새 커밋이 아니다 — 고칠 때마다 커밋 보너스를 받으면 안 된다
+    committed = bool(bare and _COMMIT.search(bare)
+                     and "--amend" not in bare)
     if committed:
         db.daily_bump(con, "commits", 1)
         base += config.COMMIT_BONUS
@@ -201,7 +215,7 @@ def on_tool(con, *, tool: str, tool_input: dict, tool_response, ok: bool,
 
     # 테스트 통과는 명령이 아니라 '출력' 을 본다. 출력은 벗기지 않는다.
     text = tool_response if isinstance(tool_response, str) else str(tool_response)
-    tested = bool(bare and _TEST_OK.search(text[:4000]))
+    tested = bool(bare and tests_passed(text))
     if tested:
         base += config.TEST_PASS_BONUS
         out.append(("test", "테스트 통과"))
@@ -253,7 +267,8 @@ def roll_day(con):
         streak = db.geti(con, "streak_days") + 1 if gap == 1 else 1
         db.put(con, "streak_days", streak)
         db.put(con, "last_day", today)
-        bonus, _ = apply(con, lcl=config.STREAK_BONUS * streak, kind="streak",
+        mult = min(streak, config.STREAK_BONUS_DAYS_MAX)
+        bonus, _ = apply(con, lcl=config.STREAK_BONUS * mult, kind="streak",
                          reason=f"{streak}일 연속", respect_cap=False)
         events.streak(con, streak)
     return streak, bonus
@@ -323,7 +338,8 @@ def settle_neglect(con, char=None):
     already = db.geti(con, "neglect_applied", char=char)
     if days <= already:
         return days, 0
-    new_days = days - already
+    # 처음 이틀(48시간)은 유예다 — 그 뒤의 날만 센다
+    new_days = days - max(already, 1)
     penalty = config.AFF_NEGLECT_PER_DAY * new_days
     total_so_far = db.geti(con, "neglect_total", char=char)
     room = config.AFF_NEGLECT_CAP - total_so_far      # 둘 다 음수

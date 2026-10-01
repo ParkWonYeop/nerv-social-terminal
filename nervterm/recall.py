@@ -72,12 +72,14 @@ def remember(con, kind: str, text: str, weight: int = 1, char=None,
     if not g:
         return 0
     c = char if char is not None else db.CHAR
+    from . import config
     for r in con.execute(
-            "SELECT id,kind,text,weight,status,target FROM memory "
+            "SELECT id,ts,kind,text,weight,status,target FROM memory "
             "WHERE player=? AND char=? ORDER BY id DESC LIMIT 60",
             (db.PLAYER, c)).fetchall():
-        if r["kind"] == "promise" and r["status"]:
-            continue
+        closed = r["kind"] == "promise" and r["status"]
+        if closed and _age_days(r["ts"]) >= config.PROMISE_REDO_DAYS:
+            continue        # 오래전에 끝난 약속 — 같은 말이면 새 약속이다
         og, ogw = seq_grams(r["text"]), grams(r["text"])
         if not og:
             continue
@@ -89,6 +91,11 @@ def remember(con, kind: str, text: str, weight: int = 1, char=None,
         # 그래서 단어 단위 겹침을 한 번 더 확인한다.
         word_jacc = len(gw & ogw) / max(1, len(gw | ogw))
         if (jacc >= 0.6 or contain >= 0.7) and word_jacc >= 0.35:
+            if closed:
+                # 최근에 지켰거나 어긴 약속을 다시 꺼낸 것 — 새 약속이 아니다.
+                # 기억 압축이 같은 대화를 다시 읽고 지킨 약속을 되살리면,
+                # 닷새 뒤 지킨 약속으로 감점을 받았다.
+                return 0
             # 약속은 시각을 건드리지 않는다 — 기한이 그 시각부터 흐른다.
             # 같은 약속을 다시 말했다고 기한이 늘어나면 안 된다.
             if r["kind"] == "promise":
