@@ -19,7 +19,8 @@ CHAR = "rei"                 # 활성 캐릭터. 게임 시작 시 set_char()로
 
 # 캐릭터와 무관한 전역 state 키 — char='' 행에 저장된다.
 GLOBAL_KEYS = {"lcl", "total_earned", "fail_streak", "streak_days",
-               "last_day", "last_active", "created"}
+               "last_day", "last_active", "created",
+               "local_since", "local_repos_at"}
 
 
 def set_char(char_id: str) -> None:
@@ -158,6 +159,23 @@ CREATE TABLE IF NOT EXISTS social (
     label  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_social ON social(player, ts);
+-- 커밋 해시 — 어디서 만든 커밋인지. 훅(claude·codex)이 적고, 로컬 판독
+-- (local.py)이 '그 밖의 곳에서 만든 커밋' 을 가려낼 때 본다.
+CREATE TABLE IF NOT EXISTS commits (
+    player TEXT NOT NULL,
+    hash   TEXT NOT NULL,
+    source TEXT NOT NULL,
+    ts     TEXT NOT NULL,
+    PRIMARY KEY (player, hash)
+);
+-- 로컬 판독이 지켜보는 git 저장소와, reflog 를 어디까지 읽었나
+CREATE TABLE IF NOT EXISTS repos (
+    player TEXT NOT NULL,
+    path   TEXT NOT NULL,
+    offset INTEGER NOT NULL DEFAULT 0,
+    mtime  REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (player, path)
+);
 """
 
 # 저장소 판(版). SCHEMA·GLOBAL_DEFAULTS·CHAR_DEFAULTS·LATER_COLUMNS·_migrate
@@ -167,7 +185,9 @@ CREATE INDEX IF NOT EXISTS idx_social ON social(player, ts);
 # v4: 저장된 LLM 텍스트(기억·인상 등)의 대괄호·개행 정화
 # v5: 약속 상태(status/target), 캐릭터별 last_seen, 근무 사건·사교 기록
 # v6: 커밋으로 쌓인 자동 호감·신뢰 회수(1회), work_scan.skip
-SCHEMA_VERSION = 6
+# v7: 'root' 유령 플레이어(데몬 아래 getlogin) 를 실제 사용자로 합침,
+#     로컬 에이전트(git 커밋·ollama) 판독용 표
+SCHEMA_VERSION = 7
 
 # 전역 기본값 (char='')
 GLOBAL_DEFAULTS = {
@@ -559,6 +579,86 @@ def _upgrade_v6(con) -> None:
              ""))
 
 
+PHANTOMS = ("root",)
+
+
+def _merge_phantoms(con) -> None:
+    """v7 — 유령 플레이어의 기록을 실제 사용자에게 합친다(1회).
+
+    tty 없이 데몬 아래에서 도는 훅(Codex 데스크톱)에서 os.getlogin() 이
+    'root' 를 돌려줘, 내 계정으로 돈 작업이 'root' 에게 적립됐다.
+    identity 는 이제 실행 계정(uid)을 본다. 이미 쌓인 것을 옮긴다.
+
+    합치는 조건 — 셋 다 맞아야 한다:
+      · 저장소 파일의 주인이 지금 사용자다 (남의 저장소가 아니다)
+      · 지금 사용자는 root 가 아니다
+      · 유령은 캐릭터를 한 번도 만난 적이 없다 — 실제로 root 로 놀았으면
+        진짜 사람이니 건드리지 않는다
+    """
+    import pwd
+    try:
+        owner = config.db_path().stat().st_uid
+        owner_name = pwd.getpwuid(owner).pw_name
+    except (OSError, KeyError):
+        return
+    if owner == 0 or owner != os.getuid() or owner_name != PLAYER:
+        return
+    for ghost in PHANTOMS:
+        if ghost == PLAYER:
+            continue
+        has = con.execute("SELECT 1 FROM state WHERE player=? LIMIT 1",
+                          (ghost,)).fetchone()
+        if not has:
+            continue
+        played = con.execute(
+            "SELECT 1 FROM state WHERE player=? AND key='met_count' "
+            "AND CAST(value AS INTEGER)>0 UNION SELECT 1 FROM dialogue "
+            "WHERE player=? LIMIT 1", (ghost, ghost)).fetchone()
+        if played:
+            continue
+
+        def num(player, key):
+            row = con.execute(
+                "SELECT value FROM state WHERE player=? AND char='' AND key=?",
+                (player, key)).fetchone()
+            try:
+                return int(row[0]) if row else 0
+            except (TypeError, ValueError):
+                return 0
+        lcl, earned = num(ghost, "lcl"), num(ghost, "total_earned")
+        for key, add in (("lcl", lcl), ("total_earned", earned)):
+            con.execute(
+                "INSERT INTO state(player,char,key,value) VALUES(?,'',?,?) "
+                "ON CONFLICT(player,char,key) DO UPDATE SET "
+                "value=CAST(CAST(value AS INTEGER)+? AS TEXT)",
+                (PLAYER, key, str(add), add))
+        # 하루 집계는 날마다 더한다
+        for row in con.execute("SELECT * FROM daily WHERE player=?",
+                               (ghost,)).fetchall():
+            con.execute("INSERT OR IGNORE INTO daily(player,day) VALUES(?,?)",
+                        (PLAYER, row["day"]))
+            con.execute(
+                "UPDATE daily SET " + ", ".join(
+                    f"{f}={f}+?" for f in DAILY_FIELDS) +
+                " WHERE player=? AND day=?",
+                (*[row[f] or 0 for f in DAILY_FIELDS], PLAYER, row["day"]))
+        con.execute("UPDATE ledger SET player=? WHERE player=?",
+                    (PLAYER, ghost))
+        for table in ("work_facts", "work_events", "projects", "commits"):
+            con.execute(f"UPDATE OR IGNORE {table} SET player=? "
+                        f"WHERE player=?", (PLAYER, ghost))
+        # 관계(만난 적 없으니 커밋으로만 생긴 것)와 나머지는 버린다
+        for table in ("state", "daily", "work_facts", "work_events",
+                      "projects", "commits", "work_scan", "dialogue",
+                      "memory", "owned", "flags", "social", "repos"):
+            con.execute(f"DELETE FROM {table} WHERE player=?", (ghost,))
+        con.execute(
+            "INSERT INTO ledger(player,char,ts,kind,delta_lcl,delta_aff,"
+            "reason,session_id) VALUES(?,?,?,?,?,?,?,?)",
+            (PLAYER, "", now(), "merge", 0, 0,
+             f"'{ghost}' 로 잘못 적립된 {lcl:,} 을 합쳤다", ""))
+
+
 def init(con: sqlite3.Connection, *, with_characters: bool = None) -> None:
     """스키마를 맞추고 기본값을 채운다.
 
@@ -587,6 +687,8 @@ def init(con: sqlite3.Connection, *, with_characters: bool = None) -> None:
     _upgrade_v5(con)
     if ver < 6:
         _upgrade_v6(con)          # 한 번만 — 판 승격과 함께
+    if ver < 7:
+        _merge_phantoms(con)
     for k, v in GLOBAL_DEFAULTS.items():
         con.execute(
             "INSERT OR IGNORE INTO state(player,char,key,value) VALUES(?,'',?,?)",
@@ -759,7 +861,7 @@ def reset_everything(con) -> None:
 def _wipe(con) -> None:
     for table in ("state", "ledger", "daily", "dialogue", "memory",
                   "owned", "flags", "work_scan", "work_facts",
-                  "work_events", "projects", "social"):
+                  "work_events", "projects", "social", "commits", "repos"):
         con.execute(f"DELETE FROM {table} WHERE player=?", (PLAYER,))
 
 

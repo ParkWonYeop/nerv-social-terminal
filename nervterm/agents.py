@@ -130,6 +130,19 @@ class Agent:
         """세션 파일 → 세션 id. 제목과 프롬프트를 이어 붙이는 열쇠."""
         return path.stem
 
+    # 훅이 있는 에이전트인가. 없으면(로컬) 설치기가 건너뛴다.
+    needs_hook = True
+    # 처음 보는 기록 파일을 처음부터 읽지 않고 끝에서 시작하는가 —
+    # 시각이 안 적힌 기록이면 지난 것을 다 '오늘' 로 읽게 된다.
+    start_at_end = False
+
+    def decode(self, line: str):
+        """기록 한 줄 → 레코드. 못 읽으면 None."""
+        try:
+            return json.loads(line)
+        except ValueError:
+            return None
+
     @staticmethod
     def newest_first(paths):
         """최근에 고친 파일부터.
@@ -526,7 +539,57 @@ class CodexAgent(Agent):
         return out
 
 
-AGENTS = [ClaudeAgent(), CodexAgent()]
+# ═══════════════════════════════════════════════════════════════════════
+#  로컬 에이전트
+# ═══════════════════════════════════════════════════════════════════════
+class LocalAgent(Agent):
+    """Ollama 로 도는 것들, 그리고 훅이 없는 모든 에이전트.
+
+    보상은 훅이 아니라 git 커밋으로 판정한다(local.py) — 무엇으로 일했든
+    커밋은 남는다. 대화는 Ollama 가 남기는 것만 읽는다: `ollama run` 에서
+    친 말이 ~/.ollama/history 에 한 줄씩 쌓인다(시각은 없다). 게임이
+    대사를 만들 때 쓰는 ollama API 호출은 여기 남지 않는다.
+    """
+
+    id = "local"
+    label = "로컬 에이전트 (Ollama 등)"
+    install_hint = "훅이 필요 없다 — 작업 폴더의 git 커밋으로 판정한다"
+    needs_hook = False
+    start_at_end = True
+    events = ()
+    tool_events = ()
+
+    def hook_path(self):
+        return None
+
+    def hook_installed(self) -> bool:
+        return True
+
+    def ollama_home(self) -> Path:
+        override = os.environ.get("OLLAMA_HOME")
+        return Path(override).expanduser() if override else (
+            Path.home() / ".ollama")
+
+    def session_files(self):
+        hist = self.ollama_home() / "history"
+        return [hist] if hist.is_file() else []
+
+    def session_id(self, path) -> str:
+        return "ollama"
+
+    def decode(self, line: str):
+        text = line.strip()
+        return {"_text": text} if text else None
+
+    def harvest(self, rec, sid_fallback=""):
+        from . import db
+        text = _clean(str(rec.get("_text") or ""))
+        if not text or text.startswith("/"):     # /bye, /set 같은 REPL 명령
+            return []
+        return [(db.today(), db.now(), "prompt", text[:160], "ollama")]
+
+
+AGENTS = [ClaudeAgent(), CodexAgent(), LocalAgent()]
 BY_ID = {a.id: a for a in AGENTS}
 
 

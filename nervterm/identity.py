@@ -10,26 +10,35 @@ from pathlib import Path
 
 
 def player() -> str:
-    """터미널 세션의 로그인 사용자명.
+    """이 프로세스를 돌리는 사람.
 
-    os.getlogin() 은 제어 tty 의 로그인 사용자를 준다. sudo 로 들어와도
-    원래 로그인한 사람이 나온다. tty 가 없으면(훅 등) 환경변수로 내려간다.
+    **실행 계정(uid)이 먼저다.** 예전에는 os.getlogin() 을 먼저 믿었다 —
+    제어 tty 의 로그인 이름이라 sudo 로 들어와도 원래 사람이 나온다는
+    이유였다. 그런데 tty 없이 데몬 아래에서 도는 프로세스(Codex 데스크톱이
+    띄운 훅)에서는 macOS 가 'root' 를 돌려준다. 프로세스는 분명 내 계정으로
+    도는데. 그래서 8월 말부터 Codex 로 한 일이 전부 'root' 라는 유령
+    플레이어에게 적립됐다 — 실측 40,720 LCL, 작업 실적의 3분의 2.
+
+    sudo 는 SUDO_USER 로 따로 본다(uid 가 0 일 때만).
     """
     if os.environ.get("REI_PLAYER"):
         return os.environ["REI_PLAYER"].strip()[:64]
+    uid = os.getuid()
+    if uid == 0 and os.environ.get("SUDO_USER"):
+        return os.environ["SUDO_USER"].strip()[:64]
     try:
-        name = os.getlogin()
+        name = pwd.getpwuid(uid).pw_name
         if name:
             return name[:64]
-    except OSError:
+    except (KeyError, OSError):
         pass
-    for key in ("SUDO_USER", "LOGNAME", "USER", "USERNAME"):
+    for key in ("LOGNAME", "USER", "USERNAME"):
         v = os.environ.get(key)
         if v:
             return v.strip()[:64]
     try:
-        return pwd.getpwuid(os.getuid()).pw_name[:64]
-    except Exception:
+        return os.getlogin()[:64]
+    except OSError:
         return "unknown"
 
 

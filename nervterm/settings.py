@@ -78,6 +78,13 @@ DEFAULTS = {
     "agents": {
         "claude": True,
         "codex": False,
+        # 로컬 에이전트 — Ollama 로 도는 것들과 훅이 없는 모든 것.
+        # 작업 폴더의 git 커밋으로 판정한다(local.py).
+        "local": False,
+    },
+    "local": {
+        # 로컬 판독이 git 저장소를 찾을 작업 폴더
+        "roots": ["~"],
     },
 }
 

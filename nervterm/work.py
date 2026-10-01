@@ -9,7 +9,6 @@ LLM을 쓰지 않는다. Claude Code가 이미 저장해 둔 것들을 줍는다
 
 읽은 바이트 위치를 기억해 증분으로만 읽는다.
 """
-import json
 import time
 
 from . import agents, db
@@ -53,6 +52,12 @@ def scan(con, *, budget=MAX_BYTES_PER_SCAN) -> int:
         if read_total >= budget:
             break
         read_total += _scan_agent(con, agent, budget - read_total)
+    if any(a.id == "local" for a in enabled):
+        from . import local
+        try:
+            local.scan(con)              # git 커밋 — 바이트 예산과 따로
+        except Exception:                                     # noqa: BLE001
+            pass
     return read_total
 
 
@@ -73,6 +78,12 @@ def _scan_agent(con, agent, budget) -> int:
             continue                   # 사람이 한 일이 아닌 세션
         if row is None and stat.st_mtime < stale:
             continue                   # 오래된 밀린 기록
+        if row is None and agent.start_at_end:
+            # 시각이 없는 기록 — 지난 것은 언제 한 말인지 모른다. 지금부터.
+            con.execute("INSERT OR IGNORE INTO work_scan(player,path,offset,"
+                        "mtime) VALUES(?,?,?,?)",
+                        (db.PLAYER, str(path), stat.st_size, stat.st_mtime))
+            continue
         offset = row["offset"] if row else 0
         if row and stat.st_mtime <= row["mtime"] and offset >= stat.st_size:
             continue
@@ -111,9 +122,8 @@ def _scan_agent(con, agent, budget) -> int:
                     line = bline.decode("utf-8", "replace").strip()
                     if not line:
                         continue
-                    try:
-                        rec = json.loads(line)
-                    except Exception:
+                    rec = agent.decode(line)
+                    if rec is None:
                         continue
                     try:
                         facts = agent.harvest(rec, sid)

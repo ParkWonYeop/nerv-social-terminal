@@ -456,13 +456,14 @@ def _():
     eq(base.normalize("dict 아님"), None, "dict 가 아니면 None")
 
 
-@check("에이전트 — 두 종류가 등록돼 있다")
+@check("에이전트 — Claude·Codex·로컬이 등록돼 있다")
 def _():
     from nervterm import agents
     ids = {a.id for a in agents.AGENTS}
-    eq(ids, {"claude", "codex"}, "에이전트 목록")
+    eq(ids, {"claude", "codex", "local"}, "에이전트 목록")
     for a in agents.AGENTS:
-        true(bool(a.hook_path()), f"{a.id}: 훅 경로가 없다")
+        if a.needs_hook:
+            true(bool(a.hook_path()), f"{a.id}: 훅 경로가 없다")
         true(isinstance(a.hook_installed(), bool),
              f"{a.id}: hook_installed 가 bool 이 아니다")
 
@@ -2308,6 +2309,194 @@ def _():
         ok, why = llm.check(con, Broken({}))
         eq(ok, False, "JSON 이 아닌데 통과")
         true("JSON" in why, f"사유: {why}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  누구인가 — 데몬 아래에서도 실제 계정
+# ═══════════════════════════════════════════════════════════════════════
+@check("식별 — getlogin 이 'root' 를 줘도 실제 실행 계정으로 본다")
+def _():
+    import pwd
+    from nervterm import identity, widget
+    me = pwd.getpwuid(os.getuid()).pw_name
+    saved = os.environ.pop("REI_PLAYER")
+    orig = os.getlogin
+    os.getlogin = lambda: "root"            # Codex 데스크톱 훅이 겪는 상황
+    try:
+        eq(identity.player(), me, "데몬 아래 훅이 'root' 로 적립된다")
+        eq(widget._player(), me, "위젯도 같은 규칙이어야 한다")
+    finally:
+        os.getlogin = orig
+        os.environ["REI_PLAYER"] = saved
+
+
+@check("v7 승격 — 유령 'root' 의 적립을 실제 사용자에게 합친다 (만난 적 있으면 안 건드림)")
+def _():
+    import pwd
+    from nervterm import db
+    me = pwd.getpwuid(os.getuid()).pw_name
+    saved = db.PLAYER
+    db.PLAYER = me
+    try:
+        with db.session() as con:
+            db.init(con)
+            for p in (me, "root"):
+                for table in ("state", "ledger", "daily"):
+                    con.execute(f"DELETE FROM {table} WHERE player=?", (p,))
+            for p, lcl in ((me, 100), ("root", 900)):
+                for key in ("lcl", "total_earned"):
+                    con.execute("INSERT INTO state(player,char,key,value) "
+                                "VALUES(?,'',?,?)", (p, key, str(lcl)))
+                con.execute("INSERT INTO daily(player,day,tools,lcl) "
+                            "VALUES(?,?,?,?)", (p, "2026-09-01", 10, lcl))
+                con.execute("INSERT INTO ledger(player,char,ts,kind,delta_lcl)"
+                            " VALUES(?,'',?,?,?)", (p, db.now(), "tool", lcl))
+            con.execute("INSERT INTO state(player,char,key,value) "
+                        "VALUES('root','rei','met_count','0')")
+            db._merge_phantoms(con)
+            eq(db.geti(con, "lcl"), 1000, "지갑을 합치지 않았다")
+            eq(con.execute("SELECT tools, lcl FROM daily WHERE player=? AND "
+                           "day='2026-09-01'", (me,)).fetchone()[:], (20, 1000),
+               "하루 집계")
+            eq(con.execute("SELECT COUNT(*) FROM state WHERE player='root'"
+                           ).fetchone()[0], 0, "유령이 남았다")
+            # 실제로 root 로 논 사람은 건드리지 않는다
+            con.execute("INSERT INTO state(player,char,key,value) "
+                        "VALUES('root','','lcl','5')")
+            con.execute("INSERT INTO state(player,char,key,value) "
+                        "VALUES('root','rei','met_count','3')")
+            db._merge_phantoms(con)
+            eq(db.geti(con, "lcl"), 1000, "실제 root 플레이어를 합쳐 버렸다")
+            for table in ("state", "ledger", "daily"):
+                con.execute(f"DELETE FROM {table} WHERE player IN (?,?)",
+                            (me, "root"))
+    finally:
+        db.PLAYER = saved
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  로컬 에이전트 — git 커밋 · Ollama 대화
+# ═══════════════════════════════════════════════════════════════════════
+def _git(repo, *args):
+    import subprocess
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
+    subprocess.run(["git", "-C", str(repo), *args], check=True, env=env,
+                   capture_output=True)
+
+
+def _commit(repo, msg):
+    (Path(repo) / f"f{abs(hash(msg)) % 100000}.txt").write_text(msg)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", msg)
+
+
+@check("로컬 — reflog 를 git 없이 읽는다")
+def _():
+    from nervterm import local
+    got = local.parse_reflog_line(
+        "0000 abcd1234 t <t@x> 1790000000 +0900\tcommit: 버그 고침")
+    eq(got, ("abcd1234", 1790000000, "commit", "버그 고침"), "한 줄")
+    true(local.is_commit("commit (amend)"), "amend")
+    true(not local.is_commit("checkout"), "checkout 은 커밋이 아니다")
+
+
+@check("로컬 — 켠 뒤의 커밋만, 훅이 적은 커밋은 빼고 적립한다")
+def _():
+    import shutil
+    from nervterm import db, local, settings, work
+    if shutil.which("git") is None:
+        return
+    base = Path(_TMP) / "local-work"
+    shutil.rmtree(base, ignore_errors=True)
+    repo = base / "proj" / "app"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _commit(repo, "켜기 전의 커밋")
+    settings.put("local.roots", [str(base)])
+    settings.put("agents.local", True)
+    try:
+        with db.session() as con:
+            db.init(con)
+            con.execute("UPDATE daily SET lcl=0 WHERE player=? AND day=?",
+                        (db.PLAYER, db.today()))
+            db.put(con, "local_since", "")
+            db.put(con, "local_repos_at", "")
+            lcl0 = db.geti(con, "lcl")
+            eq(local.scan(con), 0, "처음 켤 때 지난 커밋을 적립했다")
+            eq(db.geti(con, "lcl"), lcl0, "기준선")
+            con.execute("UPDATE state SET value=? WHERE player=? AND char='' "
+                        "AND key='local_since'",
+                        ("2000-01-01T00:00:00", db.PLAYER))
+            _commit(repo, "로컬 에이전트가 한 커밋")
+            eq(local.scan(con), 1, "새 커밋을 못 봤다")
+            eq(db.geti(con, "lcl"), lcl0 + local.LOCAL_COMMIT_LCL, "적립")
+            true("로컬 에이전트가 한 커밋" in work.digest(con),
+                 "근무 일지에 안 보인다")
+            # 훅(Claude)이 이미 적은 커밋은 로컬로 또 세지 않는다
+            _commit(repo, "클로드가 한 커밋")
+            eq(local.note_commit(con, str(repo), "claude"), 1, "해시 기록")
+            eq(local.scan(con), 0, "훅이 적은 커밋을 또 적립했다")
+            # 체크를 풀면 읽지도 적립하지도 않는다
+            settings.put("agents.local", False)
+            _commit(repo, "끈 뒤의 커밋")
+            eq(local.scan(con), 0, "꺼도 적립됐다")
+    finally:
+        settings.put("agents.local", False)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@check("로컬 — 체크를 푼 에이전트의 커밋도 해시는 남긴다 (로컬로 새지 않게)")
+def _():
+    import shutil
+    from nervterm import db, settings
+    if shutil.which("git") is None:
+        return
+    repo = Path(_TMP) / "off-agent-repo"
+    shutil.rmtree(repo, ignore_errors=True)
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _commit(repo, "코덱스가 한 커밋")
+    settings.put("agents.codex", False)
+    _hook_as("codex", {"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                       "tool_input": {"command": 'git commit -m "x"'},
+                       "tool_response": "", "cwd": str(repo),
+                       "session_id": "c"})
+    import subprocess
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    with db.session() as con:
+        got = con.execute("SELECT source FROM commits WHERE player=? "
+                          "AND hash=?", (db.PLAYER, head)).fetchone()
+        eq(got["source"] if got else None, "codex", "해시를 안 남겼다")
+    shutil.rmtree(repo, ignore_errors=True)
+
+
+@check("로컬 — Ollama 대화는 켠 뒤에 친 말부터 읽는다")
+def _():
+    from nervterm import agents, db, settings, work
+    home = Path(_TMP) / "ollama-home"
+    home.mkdir(exist_ok=True)
+    hist = home / "history"
+    hist.write_text("예전에 물어본 것\n", encoding="utf-8")
+    os.environ["OLLAMA_HOME"] = str(home)
+    settings.put("agents.local", True)
+    try:
+        with db.session() as con:
+            db.init(con)
+            work.scan(con)
+            with hist.open("a", encoding="utf-8") as f:
+                f.write("이 함수 리팩터링 해 줘\n/bye\n")
+            work.scan(con)
+            texts = {r["text"] for r in con.execute(
+                "SELECT text FROM work_facts WHERE player=? AND agent='local'",
+                (db.PLAYER,))}
+            true("이 함수 리팩터링 해 줘" in texts, "새로 친 말을 못 읽었다")
+            true("예전에 물어본 것" not in texts, "켜기 전의 말을 오늘 것으로 읽었다")
+            true("/bye" not in texts, "REPL 명령을 대화로 읽었다")
+    finally:
+        settings.put("agents.local", False)
+        os.environ.pop("OLLAMA_HOME", None)
 
 
 # ═══════════════════════════════════════════════════════════════════════

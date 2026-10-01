@@ -21,7 +21,7 @@
 ![Python](https://img.shields.io/badge/python-3.9+-9ec5e0?style=flat-square)
 ![TUI](https://img.shields.io/badge/TUI-rich-e0764a?style=flat-square)
 ![Agents](https://img.shields.io/badge/Claude_Code-·_Codex-a98bd0?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-119-8fbf9a?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-131-8fbf9a?style=flat-square)
 
 </div>
 
@@ -63,14 +63,23 @@ git clone https://github.com/ParkWonYeop/nerv-social-terminal ~/nerv-social-term
 
 공용 서버 배치 시에는 `/opt/nerv-social-terminal` 에 두고 `sudo chown -R $USER` 를 적용한다.
 
-`install.sh` 는 `~/.local/bin/eva` 심볼릭 링크를 걸고 내 계정에 훅을 설치한다. 기존 훅은 보존하고 자동 백업한다. 여러 번 실행해도 중복되지 않는다.
+`install.sh` 하나로 끝난다. 설치하고, 세팅 마법사까지 이어서 돈다.
+
+| 단계 | 하는 일 |
+|---|---|
+| 1 | `python3` 3.9 이상 확인 |
+| 2 | `rich` 설치. `pip --user` 가 막힌 환경(PEP 668 — Homebrew 파이썬 등)이면 저장소 폴더에 **전용 가상환경**을 만든다. 시스템 파이썬은 안 건드린다 |
+| 3 | `~/.local/bin/eva` 등록 |
+| 4 | `eva setup` — 설치된 에이전트(Claude Code · Codex · 로컬)를 찾아 보상 대상을 고르고, 훅·상태줄을 달고, 로컬 작업 폴더를 정하고, 대화 엔진을 **연결 시험까지 해서** 고른다 |
 
 ```bash
-./install.sh --no-hooks    # 명령만 등록
-./install.sh --uninstall   # 둘 다 제거 (저장 데이터는 남는다)
+./install.sh --yes         # 묻지 않고 찾은 대로
+./install.sh --no-hooks    # 명령만 등록 (세팅은 나중에  eva setup)
+./install.sh --uninstall   # 명령·훅·상태줄 제거 (저장 데이터는 남는다)
+eva setup                  # 세팅만 다시 — 몇 번을 돌려도 중복되지 않는다
 ```
 
-소요 부품은 `python3` 와 `rich` 뿐이다 (`apt install python3-rich` 또는 `pip install rich`).
+기존 훅은 보존하고 자동 백업한다.
 
 ---
 
@@ -98,10 +107,24 @@ python3 install-hooks.py --dry-run        # 미리보기
 
 두 에이전트의 훅 규격이 동일해서 설치 계통도 하나다. 접속 지점만 다르다.
 
-| 계통 | 훅 설정 | 세션 기록 |
-|---|---|---|
-| Claude Code | `~/.claude/settings.json` | `~/.claude/projects/*/*.jsonl` |
-| Codex | `~/.codex/hooks.json` | `~/.codex/sessions/**/rollout-*.jsonl` |
+| 계통 | 훅 설정 | 세션 기록 | 보상 판정 |
+|---|---|---|---|
+| Claude Code | `~/.claude/settings.json` | `~/.claude/projects/*/*.jsonl` | 도구 호출마다 훅 |
+| Codex | `~/.codex/hooks.json` | `~/.codex/sessions/**/rollout-*.jsonl` · `session_index.jsonl` | 도구 호출마다 훅 |
+| 로컬 에이전트 | 없음 | `~/.ollama/history` (`ollama run` 에서 친 말) | 작업 폴더의 **git 커밋** |
+
+### 局所端末 — 로컬 에이전트
+
+Ollama 로 도는 것들(aider · opencode · goose …)은 종류가 너무 많고 대부분 훅이
+없다. 그래서 도구마다 맞추지 않고, 무엇으로 일했든 남는 것을 본다 — **git 커밋.**
+작업 폴더(기본 `~`, 3단계 아래까지)의 저장소 reflog 를 git 을 실행하지 않고 읽어,
+Claude·Codex 훅이 적어 두지 않은 새 커밋을 로컬에서 한 일로 친다(커밋 1개 = 파일
+수정 + 커밋과 같은 20 LCL, 신뢰 규칙도 같다).
+
+- 훅은 자기가 본 커밋의 해시를 적는다. **체크를 푼 에이전트의 커밋도 해시는 적는다** —
+  안 그러면 그 커밋이 로컬에서 한 일로 새어 들어와 적립된다.
+- **켠 순간부터** 센다. 켜자마자 지난 몇 년 치 커밋이 적립되면 안 된다.
+- 손으로 직접 한 커밋도 여기에 든다 — 로컬에서 한 일이니까.
 
 > **注意** — Codex 는 새 훅을 처음 볼 때 신뢰 여부를 묻는다. 승인해야 적립된다.
 
@@ -228,7 +251,14 @@ eva
 
 # 第伍項 ── 個体識別
 
-터미널 세션의 **로그인 사용자**로 구분한다. `os.getlogin()` 이 제어 tty 의 로그인 사용자를 주므로 `sudo` 로 들어와도 원래 사람이 나온다. tty 가 없으면(훅 등) `SUDO_USER` → `LOGNAME`/`USER` → uid 순으로 내려간다.
+프로세스의 **실행 계정(uid)** 으로 구분한다. `sudo` 로 들어오면(uid 0) `SUDO_USER` 로 원래 사람을 본다.
+
+> **注意** — 예전에는 `os.getlogin()` 을 먼저 믿었다. tty 없이 데몬 아래에서 도는
+> 프로세스(Codex 데스크톱이 띄운 훅)에서는 macOS 가 이걸 `root` 로 돌려준다 —
+> 프로세스는 내 계정으로 도는데. 그래서 Codex 로 한 일이 `root` 라는 유령
+> 플레이어에게 쌓였다(실측 40,720 LCL, 작업 실적의 3분의 2). 저장소 v7 승격이
+> 그걸 실제 사용자에게 **한 번** 합친다 — 저장소 주인이 지금 사용자이고, 유령이
+> 캐릭터를 한 번도 만난 적이 없을 때만.
 
 **아무것도 공유하지 않는다.** 호감도·신뢰·기억·재화·약속·근무 이력 전부 따로다.
 
@@ -915,6 +945,7 @@ eva --plugins       장착된 부품 확인
 | 拾七 | **대화를 안 해도 호감이 오름** — 말 한 번 안 건 개체까지 100 | 커밋 한 번에 전원 호감 +2, 상한 없음. 인사도 +1 까지 허용 | 근무는 호감을 안 준다. 인사는 수치 고정. v6 승격 때 1회 회수 |
 | 拾八 | Claude Code 의 도구 실패가 안 잡힘 | `PostToolUse` 는 성공에만 발동한다. 실패 이벤트(`PostToolUseFailure`)를 '없는 이벤트' 로 잘못 알고 등록을 걷어냈다 | 다시 등록 |
 | 拾九 | 0.153 이후 Codex 작업이 근무 일지에 안 잡힘 | 기록 형식 변경 · 승인 검토 스레드 · Claude 가 판독량 독차지 | 새 형식 판독, 검토 스레드 제외, 판독량 배분 |
+| 弐拾 | **Codex 로 한 일이 내 지갑에 안 들어옴** — `root` 에게 40,720 LCL | 데몬 아래 훅에서 `os.getlogin()` 이 `root` 를 돌려줌 | 실행 계정(uid)으로 식별, v7 승격 때 유령 기록을 합침 |
 
 > **診断** — `/status` 에 이상한 감점이 보이면 `ledger` 테이블에 사유가 남아 있다.
 >
@@ -960,7 +991,7 @@ REI_HOOK_DEBUG=1                                hook.log 에 훅 동작 기록
 ### 動作試験
 
 ```bash
-python3 tests/smoke.py    # 계통 시험 101건
+python3 tests/smoke.py    # 계통 시험 113건
 python3 tests/keys.py     # 입력 시험 18건 (의사 터미널)
 ```
 

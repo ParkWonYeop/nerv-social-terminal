@@ -59,6 +59,30 @@ def _enabled(agent: str) -> bool:
     return bool(table.get(agent))
 
 
+def _remember_commit_only(payload: dict) -> None:
+    """체크를 푼 에이전트 — 적립은 안 하지만 커밋 해시는 적는다.
+
+    안 적으면 '로컬 에이전트' 를 켜 둔 사람에게 이 커밋이 로컬에서 한 일로
+    보여 적립된다. 체크를 푼 쪽의 작업이 다른 문으로 들어오는 셈이다.
+    """
+    if payload.get("hook_event_name") != "PostToolUse":
+        return
+    ti = payload.get("tool_input") or {}
+    cmd = str(ti.get("command", "")) if isinstance(ti, dict) else ""
+    if "commit" not in cmd:
+        return
+    try:
+        from . import db, economy, local
+        if not economy._COMMIT.search(economy.strip_literals(cmd)):
+            return
+        with db.session(write=True) as con:
+            db.init(con, with_characters=False)
+            local.note_commit(con, str(payload.get("cwd") or ""),
+                              _agent_of(payload))
+    except Exception as exc:                                  # noqa: BLE001
+        _note(f"commit-only ERROR {type(exc).__name__}: {exc}")
+
+
 def _locked(exc) -> bool:
     import sqlite3
     return (isinstance(exc, sqlite3.OperationalError)
@@ -117,6 +141,11 @@ def _run(payload: dict) -> None:
                 cwd=str(payload.get("cwd") or ""),
             )
             economy.touch_activity(con)
+            if any(k == "commit" for k, _ in results):
+                # 이 커밋은 여기서 만든 것 — 로컬 판독이 또 세지 않게
+                from . import local
+                local.note_commit(con, str(payload.get("cwd") or ""),
+                                  _agent_of(payload))
             kind = _quip_kind(results)
             if kind:
                 widget.quip(con, kind, force=(kind == "danger"))
@@ -167,6 +196,7 @@ def main() -> int:
         return 0
     try:
         if not _enabled(_agent_of(payload)):
+            _remember_commit_only(payload)
             return 0
     except Exception:                                         # noqa: BLE001
         pass              # 설정을 못 읽으면 예전처럼 적립한다

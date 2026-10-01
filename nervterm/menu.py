@@ -552,19 +552,29 @@ def _agent_settings(con) -> None:
         for i, agent in enumerate(AGENTS, 1):
             on = bool(table.get(agent.id))
             installed = agent.hook_installed()
-            if on and not installed:
+            if not agent.needs_hook:
+                value = "git 커밋"
+                note = ("작업 폴더의 새 커밋이 재화가 된다 · Ollama 대화를 읽는다"
+                        if on else "읽지 않고, 적립하지 않는다")
+            elif on and not installed:
+                value = "훅 없음"
                 note = f"체크했지만 훅이 없다 — 고르면 설치한다 ({agent.install_hint})"
-            elif on:
-                note = "근무 기록을 읽고, 작업이 재화가 된다"
             else:
-                note = "읽지 않고, 적립하지 않는다"
+                value = "훅 있음" if installed else "훅 없음"
+                note = ("근무 기록을 읽고, 작업이 재화가 된다" if on
+                        else "읽지 않고, 적립하지 않는다")
             items.append(lock(V.MenuItem(
                 str(i), f"{'[✓]' if on else '[ ]'} {agent.label}",
-                value="훅 있음" if installed else "훅 없음",
-                note=note,
-                tone="warn" if on and not installed else
+                value=value, note=note,
+                tone="warn" if on and agent.needs_hook and not installed else
                      ("plain" if on else "dim"),
                 payload=agent), "agents"))
+        if table.get("local"):
+            roots = ", ".join(settings.get("local.roots") or ["~"])
+            items.append(lock(V.MenuItem(
+                "r", "로컬 — 작업 폴더", value=roots,
+                note="이 폴더들 아래(3단계까지)의 git 저장소를 지켜본다",
+                payload="roots"), "local.roots"))
 
         got = ui.menu(V.MenuView(
             title="설정 — 보상·근무 기록 대상", items=items,
@@ -577,9 +587,19 @@ def _agent_settings(con) -> None:
         agent = next((it.payload for it in items if it.key == got), None)
         if agent is None:
             continue
+        if agent == "roots":
+            raw = term.ask_line("  작업 폴더 (쉼표로 여럿, 예: ~/projects, ~/work) > ")
+            dirs = [d.strip() for d in (raw or "").split(",") if d.strip()]
+            if dirs:
+                settings.put("local.roots", dirs)
+                db.put(con, "local_repos_at", "")     # 다음 정산 때 다시 찾는다
+            continue
         on = not bool(table.get(agent.id))
         settings.put(f"agents.{agent.id}", on)
-        if on and not agent.hook_installed():
+        if agent.id == "local" and on:
+            # 켠 순간부터 센다 — 지난 커밋을 한꺼번에 적립하지 않는다
+            db.put(con, "local_since", "")
+        if on and agent.needs_hook and not agent.hook_installed():
             _install_hook(agent)
 
 

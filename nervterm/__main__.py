@@ -225,6 +225,9 @@ def main() -> int:
     # 훅·위젯 모드는 위 모듈 최상단에서 이미 갈라져 나갔다.
     if len(sys.argv) > 1 and sys.argv[1] == "say":
         return say_once(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "setup":
+        from .wizard import main as setup_main
+        return setup_main(sys.argv[2:])
     args = parse()
     if args.plugins:
         return show_plugins()

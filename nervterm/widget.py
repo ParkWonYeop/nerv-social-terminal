@@ -48,15 +48,19 @@ def _data_dir():
 
 
 def _player():
+    # identity.player() 와 같은 규칙 — 실행 계정(uid)이 먼저다.
+    # (os.getlogin() 은 데몬 아래에서 'root' 를 돌려준다.)
     if os.environ.get("REI_PLAYER"):
         return os.environ["REI_PLAYER"].strip()[:64]
+    uid = os.getuid()
+    if uid == 0 and os.environ.get("SUDO_USER"):
+        return os.environ["SUDO_USER"].strip()[:64]
     try:
-        name = os.getlogin()
-        if name:
-            return name[:64]
-    except OSError:
+        import pwd
+        return pwd.getpwuid(uid).pw_name[:64]
+    except (KeyError, OSError, ImportError):
         pass
-    for key in ("SUDO_USER", "LOGNAME", "USER", "USERNAME"):
+    for key in ("LOGNAME", "USER", "USERNAME"):
         v = os.environ.get(key)
         if v:
             return v.strip()[:64]
