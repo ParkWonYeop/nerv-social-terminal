@@ -16,6 +16,7 @@ import json
 import os
 import sqlite3
 import sys
+import unicodedata
 
 # ANSI. rich 를 부르지 않는다 — 그것만으로 30ms 가 든다.
 RESET = "\x1b[0m"
@@ -65,6 +66,31 @@ def _player():
         if v:
             return v.strip()[:64]
     return "unknown"
+
+
+# 이보다 좁으면 신뢰·관심·인내를 빼고 한 줄을 줄인다
+COMPACT_BELOW = 72
+
+
+def _columns() -> int:
+    """상태줄 폭. Claude Code 는 파이프로 부르므로 터미널을 못 볼 수 있다."""
+    try:
+        return int(os.environ.get("COLUMNS") or 0) or os.get_terminal_size(
+            sys.__stderr__.fileno()).columns
+    except (OSError, ValueError, AttributeError):
+        return 100
+
+
+def _cut(text: str, room: int) -> str:
+    """화면 폭(한글 2칸)으로 자른다. rich 를 부르지 않으려고 따로 쓴다."""
+    out, used = [], 0
+    for ch in text:
+        w = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if used + w > room - 1:
+            return "".join(out) + "…"
+        out.append(ch)
+        used += w
+    return text
 
 
 def _gauge(value, width=10, color=WHITE):
@@ -142,30 +168,36 @@ def render(payload=None):
     stage = stage_of(rows.get("widget_stages", ""), aff,
                      rows.get("widget_stage") or "")
     out = []
-    line1 = (
-        f"{color}{name}{RESET}  {_gauge(aff, 10, color)} {WHITE}{aff:>3}{RESET}"
-        f" {DIM}{stage}{RESET}"
-        f"   {DIM}신뢰{RESET} {num('trust'):>3}"
-        f" {DIM}관심{RESET} {num('interest'):>3}"
-        f" {DIM}인내{RESET} {num('patience'):>3}"
-        f"   {DIM}{cur}{RESET} {sym} {num('lcl'):,}"
-    )
+    cols = _columns()
+    mark = f" {DIM}◆ {stage}{RESET}" if stage else ""
+    if cols < COMPACT_BELOW:
+        line1 = (f"{color}{name}{RESET} {_gauge(aff, 6, color)} "
+                 f"{WHITE}{aff:>3}{RESET}{mark}  {sym} {num('lcl'):,}")
+    else:
+        line1 = (
+            f"{color}{name}{RESET}  {_gauge(aff, 10, color)} "
+            f"{WHITE}{aff:>3}{RESET}{mark}"
+            f"   {DIM}신뢰{RESET} {num('trust'):>3}"
+            f" {DIM}관심{RESET} {num('interest'):>3}"
+            f" {DIM}인내{RESET} {num('patience'):>3}"
+            f"   {DIM}{cur}{RESET} {sym} {num('lcl'):,}"
+        )
     out.append(line1)
 
     # 대화보다 새로운 한 마디(훅이 남긴 것)가 있으면 그걸 보여 준다.
     # 커밋하고, 실패하고, 세션을 마칠 때 — 단말을 보고 있다는 증거다.
     text, quip = "", rows.get("widget_quip") or ""
     quip_ts = rows.get("widget_quip_ts") or ""
+    lead = ""
     # 같은 초면 한 마디 쪽 — 훅은 대화가 끝난 뒤에 돈다.
     if quip and (not last or quip_ts >= (last[2] or "")):
         text = quip
+        lead = "↳ "          # 방금 한 일에 대한 반응이다 — 대화와 구별한다
     elif last and last[0]:
         text = last[0]
     if text:
-        text = text.replace("\n", " ").strip()
-        if len(text) > 58:
-            text = text[:57] + "…"
-        out.append(f"{color}「{text}」{RESET}")
+        text = _cut(text.replace("\n", " ").strip(), max(12, cols - 8))
+        out.append(f"{DIM}{lead}{RESET}{color}「{text}」{RESET}")
 
     return "\n".join(out)
 

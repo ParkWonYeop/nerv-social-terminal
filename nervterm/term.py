@@ -92,7 +92,65 @@ def read_input(prompt="  > ", rgb=(201, 138, 43)):
             return input()
         except UnicodeDecodeError:
             return ""
-    return input(f"\001{color}\002{prompt}\001{reset}\002")
+    _prefill()
+    try:
+        return input(f"\001{color}\002{prompt}\001{reset}\002")
+    finally:
+        if readline is not None:
+            readline.set_startup_hook(None)
+
+
+# ── 미리 친 글자 ───────────────────────────────────────────────────────
+#
+# 연출(부팅·타이핑)을 아무 키로 건너뛸 수 있게 하면, 그 키가 답장의 첫
+# 글자였을 수도 있다. 버리지 않고 모아 뒀다가 다음 입력 줄에 미리 채운다.
+_pending = []
+
+
+def stash(text: str) -> None:
+    """건너뛰기에 쓰인 키가 글자였다 — 다음 입력 줄에 넣어 준다."""
+    if text and text.isprintable():
+        _pending.append(text)
+
+
+def _prefill() -> None:
+    if not _pending or readline is None:
+        _pending.clear()
+        return
+    text = "".join(_pending)
+    _pending.clear()
+    readline.set_startup_hook(lambda: readline.insert_text(text))
+
+
+# ── Tab 자동완성 ───────────────────────────────────────────────────────
+_completer = None
+
+
+def set_completer(fn) -> None:
+    """fn(지금까지 친 줄) -> [후보]. 줄 전체를 받아 마지막 낱말의 후보를 준다.
+
+    readline 이 없으면 아무것도 안 한다.
+    """
+    global _completer
+    _completer = fn
+    if readline is None:
+        return
+    readline.set_completer_delims(" ")
+    readline.set_completer(_complete if fn else None)
+    # macOS 의 기본 readline 은 libedit 이라 문법이 다르다
+    if "libedit" in (readline.__doc__ or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+
+
+def _complete(text, state):
+    try:
+        line = readline.get_line_buffer()
+        options = [c for c in (_completer(line) or []) if c.startswith(text)]
+    except Exception:                                         # noqa: BLE001
+        return None
+    return options[state] if state < len(options) else None
 
 
 def _ensure_iutf8():
@@ -140,18 +198,79 @@ def echo_off():
 
 
 def type_inline(text, style, delay):
-    """줄바꿈 없이 제자리에서 한 글자씩. Ctrl+C 면 남은 글자 즉시 출력."""
+    """줄바꿈 없이 제자리에서 한 글자씩. **아무 키나** 누르면 남은 글자를
+    한 번에 찍는다(누른 키가 글자면 다음 입력 줄에 넣어 준다)."""
     if delay <= 0 or not sys.stdout.isatty():
         console.print(Text(text, style=style), end="")
         return
     done = 0
-    with echo_off():
+    with cbreak():
         try:
             for done, ch in enumerate(text, 1):
                 console.print(Text(ch, style=style), end="")
-                time.sleep(delay)
+                if skip_pressed(delay):
+                    console.print(Text(text[done:], style=style), end="")
+                    return
         except KeyboardInterrupt:
             console.print(Text(text[done:], style=style), end="")
+
+
+@contextmanager
+def cbreak():
+    """키 하나하나를 바로 읽을 수 있게(에코 없이). 연출을 건너뛸 때 쓴다.
+
+    줄 단위(canonical) 모드에서는 엔터를 치기 전까지 키가 안 보인다.
+    Ctrl+C 는 그대로 신호로 간다.
+    """
+    if not is_tty():
+        yield
+        return
+    try:
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        tty.setcbreak(fd, termios.TCSANOW)
+        new = termios.tcgetattr(fd)
+        new[3] &= ~termios.ECHO
+        termios.tcsetattr(fd, termios.TCSANOW, new)
+    except Exception:                                         # noqa: BLE001
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        except Exception:                                     # noqa: BLE001
+            pass
+
+
+def skip_pressed(wait: float = 0.0) -> bool:
+    """wait 초 안에 키가 눌렸는가. 눌렸으면 그 키를 먹고 True.
+
+    cbreak() 안에서 쓴다. 글자 키면 다음 입력 줄로 넘긴다(stash).
+    """
+    if not is_tty():
+        if wait:
+            time.sleep(wait)
+        return False
+    fd = sys.stdin.fileno()
+    if not _waiting(fd, wait):
+        return False
+    try:
+        raw = os.read(fd, 64)
+    except OSError:
+        return True
+    text = raw.decode("utf-8", "ignore")
+    if text and not text.startswith("\x1b") and text not in ("\r", "\n"):
+        stash(text)
+    return True
+
+
+def pause(seconds: float) -> bool:
+    """연출용 대기. 아무 키나 누르면 바로 True (나머지 연출을 건너뛴다)."""
+    return skip_pressed(seconds)
 
 
 def cursor_up(n: int) -> None:

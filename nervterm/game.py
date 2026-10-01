@@ -15,7 +15,7 @@ import random
 import uuid
 
 from . import (characters, clock, config, db, economy, events, llm, persona,
-               recall, settings, social, stance, ui, world)
+               recall, settings, social, stance, term, ui, world)
 from .hangul import josa
 from .ui import view as V
 
@@ -51,6 +51,14 @@ DEFAULT_CHOICES = ["옆에 조용히 앉는다", "무슨 생각을 하냐고 묻
                    "말없이 하늘을 본다"]
 
 
+class Cancelled(Exception):
+    """대답을 기다리다 그만뒀다(Ctrl+C). 그 턴만 접고 대화로 돌아간다.
+
+    예전에는 KeyboardInterrupt 가 그대로 올라가 게임이 트레이스백과 함께
+    꺼졌다. 로컬 모델은 한 턴에 수십 초 — 기다리다 누르기 딱 좋다.
+    """
+
+
 class Game:
     LABEL = {"trust": "신뢰", "interest": "관심", "patience": "인내"}
 
@@ -62,6 +70,8 @@ class Game:
         self.animate = animate and not headless
         self.headless = headless
         self.buf = []          # 화면에 보일 최근 로그 (V.LogEntry)
+        self.history = []      # 이번 접속의 로그 전부 — /log
+        self.pages = True      # 기록 화면을 전체 화면으로(아무 키나 → 돌아오기)
         self.framed = False    # 하단 고정 프레임이 화면에 그려져 있는가
         self.sess = uuid.uuid4().hex[:12]      # 이번 접속 식별자
         self.typing = settings.get("typing_speed", 0.028)
@@ -122,6 +132,15 @@ class Game:
             offline=self.offline,
             billable=llm.is_billable(),
             terminal_name=w.terminal_name,
+            talk_today=db.cap_used(con, "aff_talk"),
+            talk_max=config.AFF_TALK_DAILY_MAX,
+            aff_today=db.cap_used(con, "aff_day"),
+            aff_max=config.AFF_DAILY_MAX,
+            promises_open=len(stance.open_promises(con)),
+            care_days=max([left for *_x, left, _m in self.care_active()]
+                          or [-1]),
+            dates_today=db.cap_used(con, "dates"),
+            dates_max=config.DATE_DAILY_MAX,
         )
 
     def last_seen(self):
@@ -211,8 +230,11 @@ class Game:
 
     # ── 출력 ───────────────────────────────────────────────────────────
     def push(self, role, text, emotion=""):
-        self.buf.append(V.LogEntry(role, text, emotion))
+        entry = V.LogEntry(role, text, emotion)
+        self.buf.append(entry)
         self.buf = self.buf[-40:]
+        self.history.append(entry)
+        self.history = self.history[-1000:]
 
     def redraw(self, *, animate=False):
         if self.headless:
@@ -224,6 +246,34 @@ class Game:
     def page(self):
         """흐르는 출력(목록·기록 화면) 시작 — 프레임이 깨졌음을 표시."""
         self.framed = False
+
+    def show_page(self, render) -> None:
+        """기록 화면 하나를 전체 화면으로 보여 주고, 아무 키나 누르면
+        대화 화면으로 돌아온다. 길면 less 로 넘겨 스크롤하게 한다.
+
+        예전에는 대화 화면 위로 흘러가 상태창이 위로 밀려 올라갔고,
+        엔터를 쳐도 돌아오지 않았다.
+        """
+        self.page()
+        if self.headless or not self.pages or not term.is_tty():
+            render()
+            return
+        import pydoc
+        import shutil
+        import sys
+        console = ui.console
+        with console.capture() as cap:
+            render()
+        text = cap.get()
+        console.clear()
+        if text.count("\n") > console.height - 3 and shutil.which("less"):
+            pydoc.pipepager(text, "less -R")
+        else:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            ui.page_footer()
+            term.read_key()
+        self.redraw()
 
     def remember_for_widget(self):
         """Claude Code 상태줄 위젯이 읽을 값을 갱신한다.
@@ -328,7 +378,10 @@ class Game:
         sysp = persona.system_prompt(
             self.char, self.context(st, extra_ctx, query=query,
                                     boring=boring), extra)
-        raw = llm.ask(self.con, sysp, user_msg, offline=self.offline)
+        try:
+            raw = llm.ask(self.con, sysp, user_msg, offline=self.offline)
+        except KeyboardInterrupt:
+            raise Cancelled() from None
         got = llm.normalize(raw, clamp=clamp) if raw else None
         if got:
             return got
@@ -347,6 +400,11 @@ class Game:
         if self.offline:
             return _null()
         return ui.thinking(self.char.name)
+
+    def cancelled(self) -> None:
+        """Ctrl+C 로 그 턴을 접었다."""
+        self.push("sys", "…대답을 기다리지 않았다.")
+        self.redraw()
 
     # ── 명령 ───────────────────────────────────────────────────────────
     def consolidate(self):
@@ -370,6 +428,8 @@ class Game:
             return recall.consolidate(
                 self.con, ask_fn, name=self.char.name,
                 targets=persona.targets_text(self.char), check_target=check)
+        except KeyboardInterrupt:
+            return 0              # 기억 정리는 다음 접속 때 다시 한다
         except Exception:                                     # noqa: BLE001
             if os.environ.get("NERV_DEBUG") or os.environ.get("REI_DEBUG"):
                 import traceback
@@ -569,7 +629,8 @@ class Game:
             rows.append(V.ShopRow(
                 key=k, name=name, price=price, need=need,
                 affordable=st.money >= price,
-                given=(owned["given"] if owned else 0)))
+                given=(owned["given"] if owned else 0),
+                hint=first_sentence(self.char.gifts[k][4])))
         locked = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
                             locked=True)
                   for k, v in catalog(self.char.gifts, st.affection,
@@ -656,8 +717,11 @@ class Game:
         """장면 한 막. 실패하면 사전 대사로 채운다."""
         rules = self.SCENE_RULES if choices else ""
         sysp = persona.system_prompt(self.char, self.context(st), rules)
-        with self._thinking():
-            raw = llm.ask(self.con, sysp, msg, offline=self.offline)
+        try:
+            with self._thinking():
+                raw = llm.ask(self.con, sysp, msg, offline=self.offline)
+        except KeyboardInterrupt:
+            raise Cancelled() from None
         got = llm.normalize(raw, clamp=clamp) if raw else None
         if not got:
             self.note_llm_failure()
@@ -707,10 +771,19 @@ class Game:
             return f"오늘은 벌써 {config.DATE_DAILY_MAX}번 함께 나갔다 — 내일 다시"
         return ""
 
+    def date_hint(self, key: str, setting: str) -> str:
+        """장소 한 줄 소개 + 몇 번 와 봤는지."""
+        visits = int(db.flag(self.con, f"date_count_{key}") or 0)
+        bits = [first_sentence(setting)]
+        if visits:
+            bits.append(f"{visits}번 와 봤다")
+        return " · ".join(b for b in bits if b)
+
     def date_view(self, st) -> V.ShopView:
         rows = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
                           affordable=st.money >= v[1],
-                          reason=self.date_block(k))
+                          reason=self.date_block(k),
+                          hint=self.date_hint(k, v[3]))
                 for k, v in catalog(self.char.dates, st.affection)]
         locked = [V.ShopRow(key=k, name=v[0], price=v[1], need=v[2],
                             locked=True)
@@ -757,6 +830,8 @@ class Game:
             return
 
         con = self.con
+        before = (db.flag(con, f"date_last_{key}"),
+                  db.flag(con, f"date_count_{key}"), db.cap_used(con, "dates"))
         with db.tx(con):
             db.capped(con, "dates", 1, config.DATE_DAILY_MAX)
             db.flag(con, f"date_last_{key}", _dt.date.today().isoformat())
@@ -773,7 +848,20 @@ class Game:
                f"{josa(nm, '과/와')} 단둘이 이 장소에 왔다. 도착한 순간의 "
                f"장면과 {nm}의 첫 마디를 쓰고, 상대가 고를 행동 3개를 "
                "제시하라.")
-        got = self._scene(st, msg, clamp=2, choices=True, setting=setting)
+        try:
+            got = self._scene(st, msg, clamp=2, choices=True, setting=setting)
+        except Cancelled:
+            # 장면이 시작도 못 했다 — 다녀온 걸로 치지 않고 값도 돌려준다
+            with db.tx(con):
+                economy.apply(con, lcl=price, kind="refund", reason=name,
+                              respect_cap=False)
+                db.flag(con, f"date_last_{key}", before[0] or "")
+                db.flag(con, f"date_count_{key}", before[1] or "0")
+                db.put(con, "cap_dates", f"{db.today()}:{before[2]}")
+            self.push("sys", f"{name} — 그만뒀다. "
+                             f"({st.currency_symbol} {price} 돌려받음)")
+            self.redraw()
+            return
         self.speak(got, kind="date")
 
         action = self._take_action(got["choices"])
@@ -835,7 +923,8 @@ class Game:
                 left = active[key]
                 label += f"  (지금 {'오늘까지' if left == 0 else f'{left}일 더'})"
             rows.append(V.ShopRow(key=key, name=label, price=price,
-                                  affordable=st.money >= price))
+                                  affordable=st.money >= price,
+                                  hint=first_sentence(_m)))
         return V.ShopView(
             title=f"돌봄 — 며칠 동안 {josa(self.char.name, '을/를')} 챙긴다",
             rows=rows, money=st.money, currency_symbol=st.currency_symbol,
@@ -1050,7 +1139,7 @@ class Game:
                    for _pid, text, target, age in stance.open_promises(con)]
         kept = [r["text"] for r in stance.promises(con, status="kept",
                                                    limit=3)]
-        ui.status(V.StatusView(
+        self.show_page(lambda: ui.status(V.StatusView(
             player=st.player, char_name=self.char.name,
             axes=[V.Axis("호감", st.affection, 40),
                   V.Axis("신뢰", st.trust, 40),
@@ -1064,7 +1153,7 @@ class Game:
             work_days=work_days, ledger=ledger,
             total_earned=db.geti(con, "total_earned"),
             money=st.money, met_count=db.geti(con, "met_count"),
-            currency_symbol=st.currency_symbol))
+            currency_symbol=st.currency_symbol)))
 
     def memory(self):
         self.page()
@@ -1075,8 +1164,9 @@ class Game:
                     "WHERE player=? AND char=? AND status<>'forgotten' "
                     "ORDER BY weight DESC, id DESC LIMIT 24",
                     (db.PLAYER, self.char.id))]
-        ui.memory(V.MemoryView(char_name=self.char.name, rows=rows,
-                               pending=recall.pending_count(self.con)))
+        pending = recall.pending_count(self.con)
+        self.show_page(lambda: ui.memory(V.MemoryView(
+            char_name=self.char.name, rows=rows, pending=pending)))
 
     def worklog(self):
         """캐릭터가 보고 있는 근무 기록을 그대로 보여준다."""
@@ -1084,16 +1174,25 @@ class Game:
         self.page()
         digest = self.work.digest(self.con)
         recent = events.recent(self.con, days=7, limit=6)
-        ui.worklog(V.WorklogView(
+        view = V.WorklogView(
             char_name=self.char.name,
             today=digest.splitlines() if digest else [],
             past=self.work.past_days(self.con, 5),
-            events=[f"{ts[5:16]}  {text}" for _i, ts, _k, text in recent]))
+            events=[f"{ts[5:16]}  {text}" for _i, ts, _k, text in recent])
+        self.show_page(lambda: ui.worklog(view))
+
+    def log_view(self):
+        """이번 접속에서 나눈 말 전부 — 화면에는 들어가는 만큼만 보인다."""
+        view = V.LogView(char_name=self.char.name,
+                         entries=[e for e in self.history
+                                  if e.role in ("user", "rei", "narr",
+                                                "inner", "sys")])
+        self.show_page(lambda: ui.log(view))
 
     def help(self):
         self.page()
         w = world.active()
-        ui.help(V.HelpView(
+        self.show_page(lambda: ui.help(V.HelpView(
             rows=[("그냥 입력", "말을 건다"),
                   ("/talk <말>", "같음"),
                   ("↑↓ Enter", "목록에서 고른다  ·  Esc 취소"),
@@ -1105,12 +1204,28 @@ class Game:
                   ("/status", "관계 상태 · 약속 · 근무 기록 · 변화 내역"),
                   ("/memory", "기억하는 것들"),
                   ("/work", "단말로 보고 있는 근무 기록과 눈에 띄는 일"),
+                  ("/log", "이번 접속에서 나눈 말 전부"),
                   ("/clear", "화면 정리"),
-                  ("/quit", "나간다")],
+                  ("/quit", "시작 화면으로  ·  /exit 바로 끝내기"),
+                  ("Tab", "명령·선물·장소 이름 자동완성"),
+                  ("Ctrl+C", "기다리던 대답만 접는다 — 게임은 그대로다")],
             notes=[f"{josa(w.currency_name, '은/는')} 훅이 설치된 에이전트로 "
                    "실제 작업을 할 때마다 쌓인다.",
                    "약속은 지킬 수 있다 — 약속한 곳에 가고, 약속한 것을 "
-                   "주고, 다시 찾아오고, 쉬겠다고 했으면 정말 쉬면 된다."]))
+                   "주고, 다시 찾아오고, 쉬겠다고 했으면 정말 쉬면 된다.",
+                   "관계는 하루에 조금씩만 자란다 — 상태창의 '오늘 대화' "
+                   "가 그날의 몫이다."])))
+
+
+def first_sentence(text: str, limit: int = 44) -> str:
+    """목록에 보일 한 줄 소개 — 설명의 첫 문장. 길면 자른다."""
+    text = (text or "").strip()
+    for mark in (". ", "다 ", "다."):
+        cut = text.find(mark)
+        if 0 < cut < limit:
+            text = text[:cut + len(mark.rstrip())]
+            break
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def repr_q(text: str) -> str:

@@ -253,6 +253,10 @@ WORLD = World(
 
 `setting` 은 짧게 쓴다. 길면 캐릭터의 페르소나를 밀어낸다.
 
+세계관은 기본이 **자동**이다 — 플레이어가 만나러 간 캐릭터의 팩이
+`[character] world = "..."` 로 전제한 세계로 그때그때 바뀐다. 그러니 캐릭터
+팩은 자기 세계를 꼭 적어 둔다. 플레이어가 설정에서 하나로 고정하면 그걸 쓴다.
+
 ---
 
 ## UI
@@ -284,19 +288,32 @@ class UI(BaseUI):
 
 | 덮어쓸 것 | 언제 불리나 |
 |---|---|
-| `boot(animate=)` | 게임 시작. 여기에 연출을 넣는다 |
+| `boot(animate=)` | 하루 첫 기동. 여기에 연출을 넣는다 — 대기는 `term.pause(초)` 로(키가 눌리면 True: 남은 연출을 접는다) |
+| `onboarding(view)` | 처음 켰을 때 한 번. `HelpView` 를 받는다. 키를 기다린다 |
 | `title_card(card)` | 캐릭터를 고른 직후 |
 | `select_character(view)` | 시작 화면. `("char", id)` / `("settings", None)` / `("quit", None)` 반환 |
 | `frame(status, entries, hints, animate=, delay=)` | 대화 화면 전체 |
 | `header(status)` | 상태창 내용 |
 | `wrap_header(status)` | 상태창을 감싸는 것 (테두리 등) |
 | `shop(view)` | 선물·데이트 목록 |
-| `status(view)` / `memory(view)` / `worklog(view)` / `help(view)` | 각 기록 화면 |
+| `status(view)` / `memory(view)` / `worklog(view)` / `help(view)` / `log(view)` | 각 기록 화면. 게임이 출력을 받아 전체 화면 한 장(길면 `less`)으로 띄운다 — 그냥 그리기만 하면 된다 |
+| `page_footer(text)` | 기록 화면 맨 아래 '아무 키나 누르면 돌아간다' |
+| `row(indent, *parts)` | 들여쓴 한 줄. 줄이 넘쳐도 다음 줄이 같은 들여쓰기로 이어진다 |
 | `menu(view)` | 설정 화면 전부. 고른 항목의 key 반환 |
 | `notice(text, tone)` / `dim(text)` / `confirm(prompt, phrase)` | 짧은 출력 |
 | `thinking(name)` | 대기 표시 (context manager) |
 
-넘어오는 것은 전부 `nervterm.ui.view` 의 데이터 클래스다. 색도 좌표도
+넘어오는 것은 전부 `nervterm.ui.view` 의 데이터 클래스다. 최근에 늘어난 필드:
+
+| 뷰 | 필드 | 뜻 |
+|---|---|---|
+| `CharacterCard` | `summary` · `attention` | 시작 화면의 한 줄('3일 만 · 약속 1 · 새 소식 2') · 눈여겨볼 사람 |
+| `Status` | `talk_today` `talk_max` `promises_open` `care_days` `dates_today` `dates_max` | 오늘 남은 몫. `care_days` 는 돌봄이 없으면 -1 |
+| `ShopRow` | `hint` | 설명의 첫 문장, 이미 준 횟수 같은 짧은 메모 |
+| `MenuItem` | `separator` | 묶음 제목 줄. 커서가 건너뛰고 번호도 안 붙는다 |
+| `LogView` | `char_name` · `entries` | `/log` — 이번 접속에서 나눈 말 |
+
+모르는 필드는 무시해도 된다 — 기본 렌더러가 `getattr(..., 기본값)` 으로 읽는다. 색도 좌표도
 없다 — `tone` 은 `"plain" | "info" | "good" | "warn" | "danger" | "money"`
 같은 **의미**고, 그게 무슨 색인지는 플러그인이 정한다.
 
@@ -315,7 +332,9 @@ term.pad("이름", 12)      # 폭 기준 패딩
 term.truncate(s, 40)      # 폭 기준 자르기
 term.ask_line("  > ")     # 한 줄 입력. 취소면 None
 term.echo_off()           # 에코 끄기 (context manager)
-term.type_inline(...)     # 한 글자씩 찍기
+term.cbreak()             # 키를 하나씩 바로 읽는다 (연출 중 건너뛰기용)
+term.pause(0.3)           # cbreak 안에서 기다린다. 키가 눌리면 True
+term.type_inline(...)     # 한 글자씩 찍기. 아무 키나 누르면 나머지를 한 번에
 ```
 
 ---

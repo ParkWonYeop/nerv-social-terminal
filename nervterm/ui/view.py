@@ -55,6 +55,16 @@ class Status:
 
     terminal_name: str = ""
 
+    # 오늘 예산·진행 중인 것 — 상태창 한 줄. 0 이면 안 보인다.
+    talk_today: int = 0            # 대화로 오른 호감
+    talk_max: int = 0
+    aff_today: int = 0             # 오늘 오른 호감 전부
+    aff_max: int = 0
+    promises_open: int = 0
+    care_days: int = -1            # 돌봄 남은 일수(-1 이면 없음)
+    dates_today: int = 0
+    dates_max: int = 0
+
     def money_text(self) -> str:
         return f"{self.currency_symbol} {self.money:,}"
 
@@ -88,6 +98,10 @@ class CharacterCard:
     stage: str = ""
     color: str = ""            # 캐릭터 테마의 main 색 (플러그인이 참고)
     pack: str = ""
+    # 커서를 올리면 보이는 한 줄 — '3일 만 · 약속 1 · 새 소식 2'
+    summary: str = ""
+    # 지금 찾아가 볼 이유가 있다(오래 안 봤다·약속이 있다·새 소식)
+    attention: bool = False
 
 
 @dataclass
@@ -111,6 +125,7 @@ class ShopRow:
     given: int = 0             # 선물만 — 준 횟수
     locked: bool = False
     reason: str = ""           # 지금 못 고르는 이유(쿨다운 등). 있으면 잠긴다
+    hint: str = ""             # 커서를 올리면 보이는 한 줄 소개
 
 
 @dataclass
@@ -191,6 +206,13 @@ class WorklogView:
 
 
 @dataclass
+class LogView:
+    """이번 접속에서 나눈 말 전부 — /log"""
+    char_name: str
+    entries: list = field(default_factory=list)   # LogEntry
+
+
+@dataclass
 class HelpView:
     rows: list = field(default_factory=list)      # (명령, 설명)
     notes: list = field(default_factory=list)     # 문자열
@@ -217,6 +239,9 @@ class MenuItem:
     input_prompt: str = "  > "
     typed: str = ""
 
+    # 묶음 머리줄 — 고를 수 없고 커서도 건너뛴다
+    separator: bool = False
+
 
 @dataclass
 class MenuView:
@@ -224,7 +249,7 @@ class MenuView:
     items: list = field(default_factory=list)
     subtitle: str = ""
     notes: list = field(default_factory=list)      # (tone, text)
-    hint: str = "↑↓ 고르고 Enter.  Esc 뒤로"
+    hint: str = "↑↓·숫자로 고르고 Enter  ·  Esc/b 돌아가기"
     back_key: str = "b"
     # 화면에 한 번에 보일 줄 수. 넘으면 스크롤한다.
     max_rows: int = 12

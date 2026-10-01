@@ -326,6 +326,86 @@ TESTS = [
 ]
 
 
+SLOW_GAME = """
+import sys, time
+from pathlib import Path
+sys.path.insert(0, {root!r})
+from nervterm import agents, llm
+agents.ClaudeAgent.sessions_dir = lambda self: Path({tmp!r}) / "none"
+class Slow(llm.Provider):
+    id = "slow"; label = "느림"; billing = llm.BILLING_NONE
+    def __init__(self, *a): super().__init__({{}})
+    def available(self): return True, ""
+    def complete(self, *a, **k):
+        time.sleep(30); return '{{"line": "…"}}'
+llm.current = lambda: Slow()
+sys.argv = ["eva", "--no-anim", "--char", "rei"]
+from nervterm.__main__ import main
+sys.exit(main())
+"""
+
+
+def t_ctrl_c_keeps_game():
+    """대답을 기다리다 Ctrl+C — 그 대답만 접고 게임은 남는다.
+
+    pty 가 자식의 '제어 터미널' 이어야 Ctrl+C 가 SIGINT 로 간다
+    (setsid + TIOCSCTTY). 아니면 그냥 \\x03 글자로 들어가 시험이 안 된다.
+    """
+    import fcntl
+    import select
+    import shutil
+    import tempfile
+    import termios
+    tmp = tempfile.mkdtemp(prefix="nerv-keys-")
+
+    def ctty():
+        os.setsid()
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(
+        [sys.executable, "-c", SLOW_GAME.format(root=str(ROOT), tmp=tmp)],
+        stdin=slave, stdout=slave, stderr=subprocess.PIPE, cwd=str(ROOT),
+        close_fds=True, preexec_fn=ctty,
+        env={**os.environ, "NERV_DATA": tmp, "REI_PLAYER": "keys",
+             "CODEX_HOME": tmp, "PYTHONUNBUFFERED": "1"})
+    os.close(slave)
+
+    def pump(seconds):
+        out, end = b"", time.time() + seconds
+        while time.time() < end:
+            if select.select([master], [], [], 0.05)[0]:
+                try:
+                    out += os.read(master, 65536)
+                except OSError:
+                    break
+        return out.decode("utf-8", "replace")
+
+    try:
+        pump(3.0)                         # 타이틀 → 인사(느린 대답을 기다린다)
+        os.write(master, b"\x03")
+        after = pump(2.0)
+        alive = proc.poll() is None
+        os.write(master, b"/exit\r")
+        end = time.time() + 6
+        while proc.poll() is None and time.time() < end:
+            pump(0.2)                     # 읽어 줘야 자식이 쓰기에서 안 막힌다
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        err = proc.stderr.read().decode("utf-8", "replace")
+        if not alive:
+            raise AssertionError(f"Ctrl+C 에 게임이 끝났다:\n{err[-600:]}")
+        if "기다리지 않았다" not in after:
+            raise AssertionError(f"접었다는 말이 없다:\n{after[-600:]}")
+        eq(proc.returncode, 0, f"/exit 로 끝나야 한다 — {err[-300:]}")
+    finally:
+        os.close(master)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+TESTS.append(("Ctrl+C — 기다리던 대답만 접고 게임은 남는다", t_ctrl_c_keeps_game))
+
 def main() -> int:
     for name, fn in TESTS:
         check(name, fn)

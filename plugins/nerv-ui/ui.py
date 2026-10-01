@@ -13,7 +13,6 @@ BaseUI 를 상속해서 NERV 의 얼굴을 씌운다.
 """
 import random
 import sys
-import time
 
 from rich.align import Align
 from rich.panel import Panel
@@ -68,7 +67,8 @@ class UI(BaseUI):
     def boot(self, *, animate=True):
         """기동 연출 — 시스템 로그 → MAGI 심의 → 다이브 → NERV → 경계 동기화.
 
-        Ctrl+C 로 언제든 건너뛴다. 비 TTY / --no-anim 이면 그리지 않는다.
+        아무 키나 누르면 건너뛴다(글자 키는 다음 입력 줄로 넘어간다).
+        비 TTY / --no-anim 이면 그리지 않는다.
         """
         console.clear()
         if not (animate and sys.stdout.isatty()):
@@ -78,25 +78,25 @@ class UI(BaseUI):
         def line(text, style=DIM, pause=0.0):
             console.print(Text("  " + text, style=style))
             if pause:
-                time.sleep(pause)
+                _wait(pause)
 
         def center(text, style, pause=0.0):
             console.print(Text(" " * max(0, (w - term.width(text)) // 2) + text,
                                style=style))
             if pause:
-                time.sleep(pause)
+                _wait(pause)
 
         def inplace(text, style):
             console.print(Text("  " + text, style=style), end="\r")
 
         try:
-            with term.echo_off():
+            with term.cbreak():
                 self._boot_log(line, w)
                 self._boot_magi(line, inplace)
                 self._boot_dive(line, inplace, w)
                 self._boot_nerv(center)
                 self._boot_gate(center, w)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, _Skip):
             pass
         console.clear()
 
@@ -154,8 +154,8 @@ class UI(BaseUI):
             if status:
                 t.append(" " + status, style=color)
             console.print(t)
-            time.sleep(0.004 if i % 23 else 0.05)      # 이따금 숨 고르기
-        time.sleep(0.25)
+            _wait(0.004 if i % 23 else 0.05)      # 이따금 숨 고르기
+        _wait(0.25)
 
     # ── 2. MAGI 심의 ───────────────────────────────────────────────────
     def _boot_magi(self, line, inplace):
@@ -167,7 +167,7 @@ class UI(BaseUI):
         line("심의 안건: 오퍼레이터 단말 접속 허가", "white", 0.45)
         for i in range(3):
             inplace("합의 형성 중" + "." * (i + 1) + "  ", DIM)
-            time.sleep(0.28)
+            _wait(0.28)
         console.print()
         for magi in ("MELCHIOR-1", "BALTHASAR-2", "CASPER-3"):
             t = Text("  ")
@@ -175,7 +175,7 @@ class UI(BaseUI):
             t.append("▶  ", style=DIM)
             t.append("賛成", style=GOLD)
             console.print(t)
-            time.sleep(0.30)
+            _wait(0.30)
         line("결의 — 만장일치. 가결.", GOLD, 0.55)
 
     # ── 3. 다이브 — 엔트리 플러그 · LCL · 동조 ─────────────────────────
@@ -187,7 +187,7 @@ class UI(BaseUI):
         for i in range(bar_w + 1):
             bar = "█" * i + "░" * (bar_w - i)
             inplace(f"LCL 주입     {bar}", GEOFRONT)
-            time.sleep(0.022)
+            _wait(0.022)
         console.print()
         line("LCL 전기 분해 ................. 완료", DIM, 0.14)
         for step in ("제1단계", "제2단계", "제3단계"):
@@ -197,14 +197,14 @@ class UI(BaseUI):
         while rate < 98.2:
             rate = min(98.2, rate + random.uniform(2.5, 9.5))
             inplace(f"동조율  {rate:5.1f}%          ", "white")
-            time.sleep(0.05)
+            _wait(0.05)
         console.print()
         line("한계값 돌파 — 접속 유지", GOLD, 0.35)
         line("PATTERN 해석 .................. 청색(BLUE)", GEOFRONT, 0.40)
 
     # ── 4. NERV — 화면 정중앙에 단독으로 ───────────────────────────────
     def _boot_nerv(self, center):
-        time.sleep(0.35)
+        _wait(0.35)
         console.clear()
         h = console.height
         block = len(_NERV_LOGO) + 2
@@ -212,7 +212,7 @@ class UI(BaseUI):
             console.print()
         for row in _NERV_LOGO:
             center(row, EYE)
-            time.sleep(0.07)
+            _wait(0.07)
         console.print()
         center("God's in his heaven. All's right with the world.", GOLD, 1.2)
 
@@ -225,8 +225,17 @@ class UI(BaseUI):
             row = "".join(random.choice(_GATE_GLYPHS) for _ in range(gw))
             console.print(Text("  " + row,
                                style=GEOFRONT if i % 3 else DIM))
-            time.sleep(0.035)
-        time.sleep(0.30)
+            _wait(0.035)
+        _wait(0.30)
+
+
+class _Skip(Exception):
+    """부팅 중에 키가 눌렸다 — 남은 연출을 접는다."""
+
+
+def _wait(seconds):
+    if term.pause(seconds):
+        raise _Skip
 
 
 _BOOT_MODULES = [

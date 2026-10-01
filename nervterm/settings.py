@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import identity
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 DEFAULTS = {
     "version": SCHEMA_VERSION,
@@ -66,7 +66,10 @@ DEFAULTS = {
     # ── 플러그인 ───────────────────────────────────────────────────────
     "plugins": {
         "ui": "nerv",           # 한 번에 하나만
-        "world": "nerv",        # 세계관(재화 이름·플레이어 역할)
+        # 세계관(재화 이름·플레이어 역할). 비우면 '자동' — 만나러 간 캐릭터의
+        # 팩이 전제하는 세계를 따라간다. 레이를 만나면 NERV, 에밀리아를 만나면
+        # 루그니카. 하나로 박아 두면 다른 팩의 캐릭터가 늘 엉뚱한 세계에 섰다.
+        "world": "",
         # 캐릭터 활성 여부. {"pack_id": {"char_id": true/false}}
         # 여기 없는 캐릭터는 기본 활성으로 본다.
         "characters": {},
@@ -266,6 +269,14 @@ def _migrate(raw: dict) -> dict:
             llm.pop("model", None)
             llm.pop("base_url", None)
         raw["version"] = 3
+    if v < 4:
+        # 예전 판은 기본값까지 통째로 저장했다 — 'nerv' 는 고른 게 아니라
+        # 그때의 기본값이다. 자동(캐릭터를 따라감)으로 돌린다. 다른 세계를
+        # 직접 골랐으면 그대로 둔다.
+        plugins = raw.get("plugins")
+        if isinstance(plugins, dict) and plugins.get("world") == "nerv":
+            plugins["world"] = ""
+        raw["version"] = 4
     return raw
 
 

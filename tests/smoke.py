@@ -2817,6 +2817,171 @@ def _():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  화면·조작 (UI/UX 검토)
+# ═══════════════════════════════════════════════════════════════════════
+@check("UI — 세계관 자동: 캐릭터를 따라가고, 어긋났다는 경고가 없다")
+def _():
+    from nervterm import characters, settings, ui, world
+    settings.put("plugins.world", "")
+    try:
+        characters.load(refresh=True)
+        true(world.is_auto(), "비우면 자동이어야 한다")
+        eq(world.mismatches(), [], "자동인데 불일치를 말한다")
+        world.follow(characters.get("emilia"))
+        eq(world.active().id, "rezero", "에밀리아는 루그니카에서")
+        eq(ui.active().world.id, "rezero", "화면이 세계를 못 따라왔다")
+        world.follow(characters.get("rei"))
+        eq(world.active().id, "nerv", "레이는 NERV 에서")
+        # 옛 판이 기본값까지 저장한 'nerv' 는 자동으로 바뀐다. 다른 건 둔다.
+        got = settings._migrate({"version": 3, "plugins": {"world": "nerv"}})
+        eq(got["plugins"]["world"], "", "옛 기본값 nerv 가 자동이 안 됐다")
+        got = settings._migrate({"version": 3, "plugins": {"world": "rezero"}})
+        eq(got["plugins"]["world"], "rezero", "직접 고른 세계를 지웠다")
+    finally:
+        world.use("nerv")
+
+
+@check("UI — 하단 힌트는 좁아도 /help·/quit 을 남긴다")
+def _():
+    from nervterm import game, ui
+    con_ = ui.console
+    old = con_._width
+    try:
+        for width in (40, 60, 200):
+            con_.width = width
+            with con_.capture() as cap:
+                con_.print(ui.active().footer(game.HINT))
+            text = cap.get()
+            true("/help" in text and "/quit" in text, f"{width}칸: {text!r}")
+            if width < 100:
+                true("…" in text, f"{width}칸: 빠진 게 있다는 표시가 없다")
+    finally:
+        con_._width = old
+
+
+@check("UI — 선택기: 구분줄은 건너뛰고, 숫자는 항목 번호로 간다")
+def _():
+    from nervterm.ui import view as V
+    from nervterm.ui.base import BaseUI
+    mv = V.MenuView(title="t", items=[
+        V.MenuItem("", "묶음", separator=True),
+        V.MenuItem("1", "가"), V.MenuItem("2", "나"),
+        V.MenuItem("", "또 묶음", separator=True),
+        V.MenuItem("9", "초기화")])
+    eq(BaseUI._step(mv, 2, 1), 4, "구분줄을 밟았다")
+    eq(BaseUI._step(mv, 4, 1), 1, "돌아갈 때도 구분줄을 건너뛴다")
+    eq(BaseUI._jump(mv, "9"), 4, "9 는 '9 초기화' 로")
+    eq(BaseUI._jump(mv, "2"), 2, "번호가 맞는 항목")
+    eq(BaseUI._jump(mv, "3"), 4, "번호가 없으면 셋째 항목(구분줄 빼고)")
+    eq(BaseUI._jump(mv, "7"), None, "없는 번호")
+
+
+@check("UI — 모델 목록: 최신을 따라가는 별칭과 고정 이름을 나눈다")
+def _():
+    from nervterm import menu
+    from nervterm.llm.cli import ClaudeCLI
+    groups = menu.model_groups(ClaudeCLI.ALIASES + [
+        ("claude-opus-5-5", "Opus 5.5", "")])
+    eq([g for g, _ in groups], ["최신을 따라감", "이 모델에 고정"], "묶음")
+    eq(groups[0][1][0][0], "sonnet", "별칭이 위")
+    one = menu.model_groups([("exaone3.5:7.8b", "exaone", ""),
+                             ("llama3.2:3b", "llama", "")])
+    eq([g for g, _ in one], [""], "한쪽뿐이면 제목 없이")
+    eq(menu.model_groups([]), [], "빈 목록")
+
+
+@check("UI — 시작 화면 요약: 언제 봤나 · 약속 · 못 들은 소식")
+def _():
+    from nervterm import __main__ as M
+    from nervterm import db, events, stance
+    with db.session() as con:
+        db.init(con)
+        cid = "asuka"
+        db.put(con, "last_seen", "", char=cid)
+        eq(M.card_summary(con, cid), ("처음 만난다", False), "처음")
+        db.put(con, "last_seen", db.now(), char=cid)
+        con.execute("DELETE FROM work_events WHERE player=?", (db.PLAYER,))
+        db.put(con, "event_mark", "0", char=cid)
+        db.set_char(cid)
+        try:
+            con.execute("DELETE FROM memory WHERE player=? AND char=? "
+                        "AND kind='promise'", (db.PLAYER, cid))
+            stance.make_promise(con, "내일 또 올게", "visit")
+        finally:
+            db.set_char("rei")
+        events.note(con, "late_night", "smoke-ux", "새벽까지 단말 앞에 있었다")
+        text, attention = M.card_summary(con, cid)
+        eq(text, "오늘 만났다 · 약속 1 · 새 소식 1", "요약")
+        true(attention, "약속·소식이 있으면 눈여겨볼 것")
+        view = M.select_view(con)
+        card = next(c for c in view.cards if c.id == cid)
+        eq(card.summary, text, "카드에 요약이 실린다")
+
+
+@check("UI — 상태창 예산·기록 화면·자동완성")
+def _():
+    from nervterm import __main__ as M
+    from nervterm import characters, config, db, game
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("rei")
+        db.set_char(char.id)
+        g = game.Game(con, char, offline=True, animate=False)
+        st = g.state()
+        eq(st.talk_max, config.AFF_TALK_DAILY_MAX, "대화 예산")
+        eq(st.dates_max, config.DATE_DAILY_MAX, "데이트 예산")
+        true(st.talk_today >= 0 and st.promises_open >= 0, "오늘 값")
+        g.pages = False
+        with M.ui.console.capture() as cap:
+            for fn in (g.status, g.memory, g.worklog, g.help, g.log_view):
+                fn()
+        true("/log" in cap.get(), "도움말에 /log 가 없다")
+        true("/gift" in M.completions(g, "/"), "명령 자동완성")
+        true(set(M.completions(g, "/gift ")) == set(char.gifts), "선물 이름")
+        eq(M.completions(g, "안녕"), [], "대화에는 자동완성이 없다")
+        eq(M.run_command(g, "/q"), "", "/quit 은 돌아가기")
+        eq(M.run_command(g, "/exit"), "quit", "/exit 은 완전 종료")
+
+
+@check("UI — 힌트는 설명의 첫 문장만")
+def _():
+    from nervterm import game
+    eq(game.first_sentence("실용적인 물건. 오래 쓴다."), "실용적인 물건.", "첫 문장")
+    got = game.first_sentence("가" * 100)
+    true(len(got) <= 44 and got.endswith("…"), f"길면 자른다: {got}")
+    eq(game.first_sentence(""), "", "빈 설명")
+
+
+@check("UI — 상태줄: 좁으면 줄이고, 훅의 한 마디는 ↳ 로 구별한다")
+def _():
+    from nervterm import db, widget
+    with db.session() as con:
+        db.init(con)
+        db.put(con, "widget_char", "rei", char="")
+        db.put(con, "widget_name", "레이", char="rei")
+        db.put(con, "widget_quip", "…또 커밋했네." * 20, char="rei")
+        db.put(con, "widget_quip_ts", "9999-12-31T00:00:00", char="rei")
+    old = os.environ.get("COLUMNS")
+    try:
+        os.environ["COLUMNS"] = "60"
+        narrow = widget.render()
+        true("인내" not in narrow, f"좁은데 축 수치까지 넣었다: {narrow!r}")
+        true("↳" in narrow, "한 마디 표식이 없다")
+        quip_line = narrow.splitlines()[1]
+        import re
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", quip_line)
+        from nervterm import term
+        true(term.width(plain) <= 60, f"폭을 넘는다: {term.width(plain)}")
+        os.environ["COLUMNS"] = "120"
+        true("인내" in widget.render(), "넓으면 다 보인다")
+    finally:
+        if old is None:
+            os.environ.pop("COLUMNS", None)
+        else:
+            os.environ["COLUMNS"] = old
+
+
+# ═══════════════════════════════════════════════════════════════════════
 def main() -> int:
     import shutil
     print(f"임시 저장소: {_TMP}\n")

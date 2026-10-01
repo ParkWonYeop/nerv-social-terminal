@@ -13,6 +13,7 @@ from . import plugins, settings, spec
 
 _active = None
 LOAD_ERROR = ""
+_following = ""          # 자동 모드에서 지금 따라가는 세계 id
 
 # 세계관 플러그인이 하나도 없을 때 쓰는 최소 세계.
 # 게임이 안 켜지는 것보다는 밋밋하게라도 도는 게 낫다.
@@ -48,7 +49,8 @@ def load(*, refresh: bool = False):
         return _active
 
     from . import characters
-    wanted = settings.get("plugins.world") or characters.default_world()
+    wanted = (settings.get("plugins.world") or _following
+              or characters.default_world())
     plug, why = plugins.resolve("world", wanted, fallback="nerv")
     LOAD_ERROR = why
 
@@ -68,6 +70,38 @@ def load(*, refresh: bool = False):
 
 def active():
     return _active if _active is not None else load()
+
+
+def is_auto() -> bool:
+    """세계관을 따로 정하지 않았다 — 캐릭터를 따라간다."""
+    return not settings.get("plugins.world")
+
+
+def follow(char=None):
+    """자동 모드면 이 캐릭터의 팩이 전제하는 세계로 바꾼다.
+
+    char 가 None 이면 기본(켜진 첫 캐릭터의 세계)으로 돌아간다 — 시작
+    화면. 세계관을 직접 정해 뒀으면 아무것도 안 한다.
+    """
+    global _active, _following
+    if not is_auto():
+        return active()
+    want = ""
+    if char is not None:
+        from . import characters
+        plug = plugins.get("character", characters.pack_of(char.id))
+        want = plug.world if plug is not None else ""
+    if want == _following and _active is not None:
+        return _active
+    _following = want
+    _active = None
+    got = load(refresh=True)
+    try:
+        from . import ui
+        ui.set_world(got)
+    except Exception:                                         # noqa: BLE001
+        pass
+    return got
 
 
 def use(world_id: str):
@@ -103,6 +137,8 @@ def mismatches():
     다만 모르고 그러는 일은 없어야 한다.
     """
     from . import characters
+    if is_auto():
+        return []             # 캐릭터마다 자기 세계로 간다 — 어긋날 일이 없다
     here = active().id
     out = []
     for cid in characters.ENABLED:

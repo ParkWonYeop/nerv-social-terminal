@@ -20,7 +20,7 @@ CHAR = "rei"                 # 활성 캐릭터. 게임 시작 시 set_char()로
 # 캐릭터와 무관한 전역 state 키 — char='' 행에 저장된다.
 GLOBAL_KEYS = {"lcl", "total_earned", "fail_streak", "streak_days",
                "last_day", "last_active", "created",
-               "local_since", "local_repos_at"}
+               "local_since", "local_repos_at", "boot_day", "onboarded"}
 
 
 def set_char(char_id: str) -> None:

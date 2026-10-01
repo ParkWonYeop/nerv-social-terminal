@@ -53,8 +53,10 @@ def open_settings(con) -> str:
                        note="누구를 만날 수 있게 할지"),
             V.MenuItem("4", "화면 (UI 플러그인)", value=ui.current_id(),
                        note="바꾸면 다시 시작한다"),
-            V.MenuItem("5", "세계관", value=w.name,
-                       note=f"재화: {w.currency_name}"),
+            V.MenuItem("5", "세계관",
+                       value=("자동" if world.is_auto() else w.name),
+                       note=("만나는 캐릭터를 따라간다" if world.is_auto()
+                             else f"고정 · 재화: {w.currency_name}")),
             V.MenuItem("6", "보상·근무 기록 대상",
                        value=", ".join(settings.enabled_agents()) or "없음",
                        note="체크한 에이전트만 근무 기록을 보고 보상을 준다"),
@@ -62,14 +64,15 @@ def open_settings(con) -> str:
                        note="관계·기억·재화를 지운다"),
         ]
         notes = []
-        if plugin_problems():
-            notes.append(("danger", "플러그인 문제: " +
-                          " / ".join(plugin_problems())))
+        problems = plugin_problems()
+        if problems:
+            notes.append(("danger", "플러그인 문제: " + " / ".join(problems)))
+        for line in world_mismatch():
+            notes.append(("warn", line))
 
         got = ui.menu(V.MenuView(
             title="설정", subtitle=f"상대 — {db.PLAYER}",
-            items=items, notes=notes,
-            hint="번호를 고른다.  b 돌아가기  ·  q 나감"))
+            items=items, notes=notes))
 
         if got in (None, "b"):
             return ""
@@ -110,12 +113,22 @@ def plugin_problems():
         out.append(ui.LOAD_ERROR)
     if world.LOAD_ERROR:
         out.append(world.LOAD_ERROR)
+    return out
+
+
+def world_mismatch():
+    """세계관을 직접 정해 뒀는데 그 세계 사람이 아닌 캐릭터.
+
+    고장이 아니라 고른 결과다 — 플러그인 문제와 따로 경고로 보인다.
+    자동(캐릭터를 따라감)이면 어긋날 일이 없어 늘 빈 목록이다.
+    """
+    out = []
     for cid, want in world.mismatches():
         char = characters.get(cid)
         name = char.full if char else cid
         # 조사를 붙이지 않는다 — 이름의 받침에 따라 은/는이 갈린다.
-        out.append(f"{name} — '{want}' 세계를 전제하는 인물. 지금 세계는 "
-                   f"'{world.active().id}' 다 (설정 → 세계관)")
+        out.append(f"{name} — '{want}' 세계의 인물인데 세계관이 "
+                   f"'{world.active().id}' 로 고정돼 있다 (설정 → 세계관)")
     return out
 
 
@@ -307,15 +320,27 @@ def _pick_model(con, prov) -> None:
         models = []
     stored = ((settings.get("llm.models", {}) or {}).get(prov.id) or "")
     default = prov.default_model or "자동"
-    items = [V.MenuItem(
-        "default", f"기본값 ({default})",
-        value="사용 중" if not stored else "",
-        note="프로바이더가 정한 기본 모델", payload="")]
-    for i, (mid, name, note) in enumerate(models, 1):
-        mark = "사용 중" if mid == stored else ""
+    items = []
+    # 기본 모델이 목록에도 있으면 한 줄로 합친다 — '기본값 (sonnet)' 과
+    # 'Sonnet — 최신' 이 따로 떠서 같은 걸 두 번 고르게 했다.
+    if not any(mid == prov.default_model for mid, _, _ in models):
         items.append(V.MenuItem(
-            str(i), name, value=mark or (mid if name != mid else ""),
-            note=note or mid, payload=mid))
+            "default", f"기본값 ({default})",
+            value="사용 중" if not stored else "",
+            note="프로바이더가 정한 기본 모델", payload=""))
+    for group, rows in model_groups(models):
+        if group:
+            items.append(V.MenuItem("", group, separator=True))
+        for mid, name, note in rows:
+            is_default = mid == prov.default_model
+            using = mid == stored or (is_default and not stored)
+            mark = " · ".join(x for x in ("사용 중" if using else "",
+                                          "기본값" if is_default else "") if x)
+            n = sum(1 for it in items if not it.separator) + 1
+            items.append(V.MenuItem(
+                str(n), name,
+                value=mark or (mid if name != mid else ""),
+                note=note or mid, payload="" if is_default else mid))
     items.append(V.MenuItem(
         "_typed", "직접 입력…", tone="warn", input_mode=True,
         input_prompt="  모델 이름 > ", note="목록에 없는 이름을 쓴다"))
@@ -334,6 +359,17 @@ def _pick_model(con, prov) -> None:
     if new == stored:
         return
     _switch(con, provider_id=prov.id, model=new)
+
+
+def model_groups(models):
+    """[(제목, 모델들)] — 별칭(숫자 없는 이름: sonnet, opus)은 늘 그 계열의
+    최신을 가리키고, 정확한 이름(claude-sonnet-5-5)은 그 판에 머문다.
+    한쪽뿐이면 제목 없이 한 묶음."""
+    follow = [m for m in models if not any(c.isdigit() for c in m[0])]
+    pinned = [m for m in models if any(c.isdigit() for c in m[0])]
+    if not follow or not pinned:
+        return [("", list(models))] if models else []
+    return [("최신을 따라감", follow), ("이 모델에 고정", pinned)]
 
 
 def _switch(con, *, provider_id, model=None, agreed=False) -> bool:
@@ -489,8 +525,11 @@ def _ui_settings(con) -> bool:
 #  5. 세계관
 # ═══════════════════════════════════════════════════════════════════════
 def _world_settings(con) -> None:
-    current = world.active().id
-    items = []
+    current = "" if world.is_auto() else world.active().id
+    items = [V.MenuItem("0", "자동 — 캐릭터를 따라간다",
+                        value="사용 중" if not current else "",
+                        note="레이는 NERV 에서, 에밀리아는 루그니카에서 만난다",
+                        payload="")]
     for i, plug in enumerate(world.available(), 1):
         items.append(V.MenuItem(
             str(i), plug.name,
@@ -504,15 +543,16 @@ def _world_settings(con) -> None:
     got = ui.menu(V.MenuView(
         title="설정 — 세계관", items=items,
         subtitle="재화의 이름과 플레이어의 역할을 정한다.",
-        notes=[("plain", "캐릭터 팩이 전제하는 세계관과 다른 걸 고르면 "
+        notes=[("plain", "하나로 고정하면 다른 팩의 캐릭터도 그 세계에 선다 — "
                          "대사가 어긋날 수 있다.")]))
     if got in (None, "b", "quit"):
         return
     chosen = next((it.payload for it in items if it.key == got), None)
-    if not chosen or chosen == current:
+    if chosen is None or chosen == current:
         return
     world.use(chosen)
-    ui.notice(f"세계관을 {chosen} 로 바꿨다.", "good")
+    ui.notice("세계관 — 자동. 만나는 캐릭터를 따라간다." if not chosen
+              else f"세계관을 {chosen} 로 고정했다.", "good")
 
     # 이미 나눈 대화가 있으면 알려 준다.
     #
