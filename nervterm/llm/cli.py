@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 
 from .. import config
-from .base import BILLING_SUBSCRIPTION, Provider
+from .base import BILLING_SUBSCRIPTION, RESPONSE_SCHEMA, Provider, flatten
 
 
 def _game_env():
@@ -58,7 +58,12 @@ class ClaudeCLI(Provider):
                 encoding="utf-8")
         return str(p)
 
-    def complete(self, system, user, *, timeout=None):
+    def complete(self, system, user, *, timeout=None, schema=None):
+        # claude -p 는 스키마를 강제할 길이 없다 — 프롬프트의 출력 규칙과
+        # extract_json() 이 대신한다. 고정부가 앞에 오므로 Claude Code 의
+        # 접두사 캐시가 턴마다 맞는다.
+        system = flatten(system)
+        self.calls = 1
         cmd = [
             "claude", "-p",
             "--model", self.model,
@@ -107,26 +112,31 @@ class CodexCLI(Provider):
             return False, "codex 명령을 찾을 수 없다"
         return True, ""
 
-    def complete(self, system, user, *, timeout=None):
+    def _mode_args(self):
+        """codex exec 뒤에 붙는 모드 인자. 로컬 모델 판이 덮어쓴다."""
+        return []
+
+    def complete(self, system, user, *, timeout=None, schema=None):
         """codex exec 로 한 턴.
 
         codex 에는 --system-prompt 가 없다. 대신 지시문을 프롬프트 앞에
         붙이고, --output-schema 로 JSON 모양을 강제한다 — 프롬프트로
-        비는 것보다 이쪽이 확실하다.
+        비는 것보다 이쪽이 확실하다. 스키마는 호출마다 다르다(대사 /
+        기억 압축) — 하나로 박아 두면 압축이 캐릭터 응답 모양으로 묶여
+        facts 를 낼 수 없었다.
 
         마지막 메시지는 -o 로 파일에 받는다. --json 의 이벤트 스트림에서
         골라내는 것보다 튼튼하다.
         """
-        from .base import RESPONSE_SCHEMA
-
         tmpdir = tempfile.mkdtemp(prefix="nerv-codex-")
         schema_path = os.path.join(tmpdir, "schema.json")
         out_path = os.path.join(tmpdir, "last.txt")
+        self.calls = 1
         try:
             with open(schema_path, "w", encoding="utf-8") as f:
-                json.dump(RESPONSE_SCHEMA, f, ensure_ascii=False)
+                json.dump(schema or RESPONSE_SCHEMA, f, ensure_ascii=False)
 
-            cmd = ["codex", "exec",
+            cmd = ["codex", "exec", *self._mode_args(),
                    "--sandbox", "read-only",
                    "--skip-git-repo-check",
                    "--ephemeral",
@@ -144,7 +154,7 @@ class CodexCLI(Provider):
                    "--color", "never"]
             if self.model:
                 cmd += ["-m", self.model]
-            cmd.append(f"{system}\n\n---\n\n{user}")
+            cmd.append(f"{flatten(system)}\n\n---\n\n{user}")
 
             try:
                 proc = subprocess.run(
@@ -177,40 +187,5 @@ class CodexLocalCLI(CodexCLI):
     def local_provider(self) -> str:
         return (self.cfg.get("local_provider") or "ollama").strip()
 
-    def complete(self, system, user, *, timeout=None):
-        from .base import RESPONSE_SCHEMA
-
-        tmpdir = tempfile.mkdtemp(prefix="nerv-codex-")
-        schema_path = os.path.join(tmpdir, "schema.json")
-        out_path = os.path.join(tmpdir, "last.txt")
-        try:
-            with open(schema_path, "w", encoding="utf-8") as f:
-                json.dump(RESPONSE_SCHEMA, f, ensure_ascii=False)
-            cmd = ["codex", "exec", "--oss",
-                   "--local-provider", self.local_provider,
-                   "--sandbox", "read-only",
-                   "--skip-git-repo-check",
-                   "--ephemeral",
-                   "--ignore-user-config",
-                   "--output-schema", schema_path,
-                   "-o", out_path,
-                   "--color", "never"]
-            if self.model:
-                cmd += ["-m", self.model]
-            cmd.append(f"{system}\n\n---\n\n{user}")
-            try:
-                proc = subprocess.run(
-                    cmd, capture_output=True, text=True,
-                    stdin=subprocess.DEVNULL,
-                    timeout=timeout or self.timeout, env=_game_env())
-            except (subprocess.TimeoutExpired, OSError):
-                return None
-            if proc.returncode != 0:
-                return None
-            try:
-                with open(out_path, "r", encoding="utf-8") as f:
-                    return f.read()
-            except OSError:
-                return proc.stdout or None
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+    def _mode_args(self):
+        return ["--oss", "--local-provider", self.local_provider]

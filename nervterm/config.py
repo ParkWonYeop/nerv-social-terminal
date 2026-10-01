@@ -50,6 +50,9 @@ def llm_warn_at() -> int:
 # ── 재화(LCL) 적립 ─────────────────────────────────────────────────────
 TOOL_REWARD = {
     "Edit": 5, "Write": 5, "NotebookEdit": 5,
+    # Codex 는 파일 수정을 apply_patch 라는 이름으로 보낸다. 빠져 있으면
+    # Codex 로 같은 일을 해도 기본값 1 만 쌓였다.
+    "apply_patch": 5,
     "Bash": 2,
     "Read": 1, "Grep": 1, "Glob": 1,
     "WebFetch": 2, "WebSearch": 2,
@@ -82,6 +85,9 @@ PROMISE_GRACE_DAYS = 5       # 이 날짜가 지나면 약속이 깨진 것으�
 PROMISE_FORGET_DAYS = 14     # 감점 후 이만큼 더 지나면 약속을 잊는다.
                              # 안 잊으면 [지키지 않은 약속] 블록이 모든
                              # 프롬프트에 영구히 실린다(감점은 어차피 1회).
+TRUST_KEPT_PROMISE = 4       # 약속을 지키면. 어긴 것(-8)의 절반 —
+AFF_KEPT_PROMISE = 2         # 신뢰는 깨지기 쉽고 쌓기 어렵다.
+PROMISE_VISIT_MIN_HOURS = 3  # '또 올게' 는 이만큼은 지나서 와야 지킨 것
 
 INTEREST_DECAY_PER_DAY = -2  # 안 오면 관심이 식는다
 INTEREST_BORING = -4         # 같은 말 반복 / 내용 없는 말
@@ -91,9 +97,26 @@ PATIENCE_RECOVER_PER_HOUR = 8
 PATIENCE_BORING = -12
 PATIENCE_MIN_TALK = 15       # 이 아래면 대화를 끊으려 한다
 
+# ── 근무 사건 (events.py) ──────────────────────────────────────────────
+EVENT_BIG_DAY_TOOLS = 400     # 하루 도구 호출이 이걸 넘으면 '종일 붙어 있었다'
+EVENT_COMMIT_DAY = 10         # 하루 커밋 수
+EVENT_RECOVER_FAILS = 3       # 이만큼 연달아 실패한 뒤 테스트를 통과시키면
+STREAK_MILESTONES = (3, 7, 14, 30, 50, 100)
+NEW_PROJECT_GRACE_DAYS = 3    # 설치 직후 며칠은 '새 저장소' 를 알리지 않는다
+                              # (원래 하던 저장소가 전부 새것으로 보인다)
+ABSENT_WORK_DAYS = 2          # 이만큼 안 찾아왔는데 그동안 일은 했다면
+
+# ── 돌봄 (반복형 소비) ─────────────────────────────────────────────────
+CARE_PATIENCE_BOOST = 1.5     # 돌봄이 살아 있는 동안 인내 회복 배율
+
 # 레이가 이 사람을 어떻게 보는지(impression) 를 다시 쓰는 주기
 IMPRESSION_EVERY_TURNS = 8
 AFF_COMMIT = 2            # 커밋 시
+# 커밋은 대화가 아니다. 상한이 없으면 에이전트가 하루 열 번 커밋하는
+# 것만으로 한 번도 안 만난 캐릭터까지 나흘이면 최고 단계에 닿았다.
+# 그래서 하루 상한을 두고, 한 번이라도 만난 사람에게만 준다.
+AFF_COMMIT_DAILY_MAX = 2
+TRUST_COMMIT_DAILY_MAX = 2
 AFF_FAIL_STREAK = 3       # N회 연속 도구 실패 시
 AFF_FAIL_PENALTY = -1
 AFF_DANGER_PENALTY = -5   # 위험 명령

@@ -3,10 +3,11 @@
 """한글 입력 진단 — 터미널이 실제로 보내는 바이트를 기록한다.
 
 사용법:
-    python3 /opt/rei/diag-input.py
+    python3 diag-input.py
 
 안내에 따라 한글("안녕" 등)을 입력하면, 터미널이 서버로 보낸 원시
-바이트가 화면과 /opt/rei/data/input-capture.log 에 기록된다.
+바이트가 화면과 저장소 폴더의 input-capture.log 에 기록된다
+(~/.local/share/nerv-social-terminal/, NERV_DATA 로 바꿀 수 있다).
 1단계(raw)는 에코가 없어서 화면에 글자가 안 보이는 게 정상이다.
 """
 import datetime
@@ -15,7 +16,14 @@ import sys
 import termios
 import tty
 
-LOG = "/opt/rei/data/input-capture.log"
+# 프로젝트가 rei 이던 시절에는 /opt/rei/data 에 박혀 있었다. 지금은
+# 게임과 같은 저장소 폴더를 쓴다 — 공용 설치 위치에 쓰기 권한이 없어도 된다.
+LOG = os.path.join(
+    os.path.expanduser(os.environ.get("NERV_DATA") or os.environ.get("REI_DATA")
+                       or os.path.join(os.environ.get("XDG_DATA_HOME")
+                                       or "~/.local/share",
+                                       "nerv-social-terminal")),
+    "input-capture.log")
 
 
 def log(f, text):

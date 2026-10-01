@@ -1,0 +1,27 @@
+# 계통 시험 + 입력 시험. 의존성은 rich 하나.
+#
+# 3.9 를 따로 돌리는 이유: tomllib 이 없어 plugin.toml 을 미니 파서로
+# 읽는 경로가 거기서만 탄다. 그 경로에서 문서 예제가 깨진 적이 있다.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install rich
+      - name: 계통 시험
+        run: python tests/smoke.py
+      - name: 입력 시험 (의사 터미널)
+        run: python tests/keys.py

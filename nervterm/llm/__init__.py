@@ -12,8 +12,8 @@ None 이 오면 호출부가 사전 작성 대사를 쓴다. 그래서 모델이
 from .. import config, db, settings
 from . import guard
 from .base import (BILLING_API, BILLING_KO, BILLING_NONE,
-                   BILLING_SUBSCRIPTION, Provider, extract_json, inline_text,
-                   normalize)
+                   BILLING_SUBSCRIPTION, FACTS_SCHEMA, RESPONSE_SCHEMA,
+                   Provider, extract_json, flatten, inline_text, normalize)
 from .cli import ClaudeCLI, CodexCLI, CodexLocalCLI
 from .http import AnthropicAPI, Ollama, OpenAIAPI, OpenAICompat
 
@@ -81,9 +81,12 @@ def budget_left(con) -> int:
 
 
 # ── 한 턴 ──────────────────────────────────────────────────────────────
-def ask(con, system: str, user: str, *, offline: bool = False,
-        timeout: int = None):
+def ask(con, system, user: str, *, offline: bool = False,
+        timeout: int = None, schema: dict = None):
     """캐릭터에게 한 턴 묻는다.
+
+    system  문자열 또는 [고정부, 가변부]
+    schema  응답 JSON 스키마. 기본은 캐릭터 응답(RESPONSE_SCHEMA).
 
     성공하면 dict, 못 쓰면 None(→ 호출부가 폴백 대사 사용).
     """
@@ -97,15 +100,25 @@ def ask(con, system: str, user: str, *, offline: bool = False,
     if budget_left(con) <= 0:
         return None
 
+    # 응답을 기다리는 동안(수 초~수 분) 쓰기 락을 쥐고 있으면 안 된다.
+    # 그 사이 에이전트의 훅이 전부 막혀 도구 호출이 멈추고 적립이
+    # 버려진다. 여기까지 쌓인 변경(기억 조회 횟수 등)을 먼저 내보낸다.
+    if con.in_transaction:
+        con.commit()
+
     billable = provider.is_billable()
-    text = provider.complete(system, user, timeout=timeout)
+    provider.calls = 0
+    text = provider.complete(system, user, timeout=timeout,
+                             schema=schema or RESPONSE_SCHEMA)
 
     # 호출이 나갔으면 실패했어도 센다 — 유료라면 이미 돈이 나갔고,
     # 구독이라면 이미 한도를 썼다. 실패를 공짜로 재시도하게 두면
     # 상한이 상한 노릇을 못 한다.
     db.daily_bump(con, "llm", 1)
     if billable:
-        guard.note_call(con)
+        # 대사 상한은 '턴' 으로, 돈 상한은 실제 요청 수로 센다.
+        for _ in range(max(1, provider.calls)):
+            guard.note_call(con)
     con.commit()
 
     if text is None:

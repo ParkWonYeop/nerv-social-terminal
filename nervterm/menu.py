@@ -11,6 +11,7 @@
     "quit"      나간다
 """
 from . import (characters, db, llm, plugins, settings, term, ui, world)
+from .hangul import josa
 from .llm import guard
 from .ui import view as V
 
@@ -126,6 +127,7 @@ def _talk_settings(con) -> None:
     while True:
         anim = settings.get("animation", True)
         speed = settings.get("typing_speed", 0.028)
+        aware = settings.get("social.aware", True)
         env = settings.overridden_by_env("daily_llm_calls")
 
         items = [
@@ -140,6 +142,11 @@ def _talk_settings(con) -> None:
             lock(V.MenuItem("3", "타이핑 속도",
                             value=f"{speed:.3f}초/글자" if speed else "즉시",
                             note="0 이면 한 번에 출력"), "typing_speed"),
+            lock(V.MenuItem("4", "캐릭터 간 인지",
+                            value="켬" if aware else "끔",
+                            note=("같은 세계의 사람들은 누구와 어디에 갔고 무엇을 "
+                                  "줬는지 안다. 대화와 기억은 넘어가지 않는다")),
+                 "social.aware"),
         ]
         got = ui.menu(V.MenuView(title="설정 — 대화", items=items))
         if got in (None, "b"):
@@ -159,6 +166,8 @@ def _talk_settings(con) -> None:
                              max(0.0, min(0.2, float(raw or 0))))
             except (TypeError, ValueError):
                 pass
+        elif got == "4":
+            settings.put("social.aware", not aware)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -571,8 +580,9 @@ def _reset_one_character(con) -> None:
     if not cid:
         return
     char = characters.get(cid)
-    if ui.confirm(f"{char.full} 와의 관계·기억·선물 기록을 전부 지운다.",
-                  char.name):
+    if ui.confirm(f"{josa(char.full, '과/와')}의 관계·기억·선물 기록을 "
+                  "전부 지운다.", char.name):
         db.reset_character(con, cid)
-        ui.notice(f"{char.full} 와는 처음 만나는 사이가 됐다.", "good")
+        ui.notice(f"{josa(char.full, '과/와')}는 처음 만나는 사이가 됐다.",
+                  "good")
     ui.pause()

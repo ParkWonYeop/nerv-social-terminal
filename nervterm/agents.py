@@ -14,6 +14,7 @@
 그대로 쓰기 때문에(내부적으로 ClaudeHooksEngine 을 돌린다) hook.py 는
 누가 불렀는지 몰라도 된다.
 """
+import datetime as _dt
 import json
 import os
 import re
@@ -35,6 +36,31 @@ def is_our_hook(entry) -> bool:
 
 def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
+
+
+def local_time(ts: str):
+    """에이전트 기록의 시각 → 이 기계의 (날짜, 시각 iso).
+
+    세션 기록의 timestamp 는 UTC 다("…Z"). 앞 10글자를 날짜로 잘라 쓰면
+    한국(UTC+9)에서는 오전 9시 전에 한 일이 전부 '어제' 로 들어간다 —
+    새벽 근무를 지적하는 캐릭터가 정작 무슨 일을 했는지는 못 보는 모순이
+    생겼다. 게임의 '오늘'(db.today) 은 로컬 날짜이므로 여기서 맞춘다.
+    """
+    from . import db
+    try:
+        t = _dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        now = db.now()
+        return now[:10], now
+    if t.tzinfo is not None:
+        t = t.astimezone().replace(tzinfo=None)
+    iso = t.isoformat(timespec="seconds")
+    return iso[:10], iso
+
+
+def project_name(label: str) -> str:
+    """'nerv-social-terminal (main)' → 'nerv-social-terminal'"""
+    return (label or "").split(" (", 1)[0].strip()
 
 
 COMMIT_RE = re.compile(
@@ -133,7 +159,9 @@ class ClaudeAgent(Agent):
     # PostToolUseFailure 는 Claude Code 에 없는 이벤트라 등록하지 않는다.
     # 실패 감지는 PostToolUse 페이로드의 tool_response.is_error 로 충분
     # (hook.py). 기존 설치본의 잔존 등록은 재설치 시 걷어내진다.
-    events = ("PostToolUse", "Stop", "SessionStart", "SessionEnd")
+    # Notification — 에이전트가 사람을 기다릴 때. 상태줄 한 마디만 건다.
+    events = ("PostToolUse", "Stop", "SessionStart", "SessionEnd",
+              "Notification")
     tool_events = ("PostToolUse",)
 
     def hook_path(self) -> Path:
@@ -154,8 +182,7 @@ class ClaudeAgent(Agent):
         out = []
         t = rec.get("type")
         sid = rec.get("sessionId") or rec.get("session_id") or sid_fallback
-        ts = rec.get("timestamp", "") or db.now()
-        day = ts[:10] if len(ts) >= 10 else db.today()
+        day, ts = local_time(rec.get("timestamp", ""))
 
         if t == "ai-title":
             # timestamp 가 없다. day 를 비워 두고 digest 단계에서 세션
@@ -316,16 +343,13 @@ class CodexAgent(Agent):
         return ""
 
     def harvest(self, rec, sid_fallback=""):
-        from . import db
-
         out = []
         t = rec.get("type")
         payload = rec.get("payload")
         if not isinstance(payload, dict):
             return out
         ptype = payload.get("type", "")
-        ts = rec.get("timestamp", "") or db.now()
-        day = ts[:10] if len(ts) >= 10 else db.today()
+        day, ts = local_time(rec.get("timestamp", ""))
         sid = sid_fallback
 
         if t == "session_meta":

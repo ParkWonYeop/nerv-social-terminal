@@ -977,7 +977,7 @@ def _():
         eq(db.geti(con, "total_earned"), te, "음수 lcl 이 총획득을 깎았다")
 
 
-@check("방치 — 감점 상한, 중복 방지, 복귀 리셋")
+@check("방치 — 감점 상한, 중복 방지, 복귀 리셋 (캐릭터를 찾아온 때 기준)")
 def _():
     import datetime
     from nervterm import config, db, economy
@@ -986,15 +986,21 @@ def _():
         db.set_char("rei")
         past = (datetime.datetime.now()
                 - datetime.timedelta(days=30)).isoformat(timespec="seconds")
-        db.put(con, "last_active", past)
+        db.put(con, "last_seen", past)
+        # 에이전트로 매일 일했어도(전역 last_active 가 지금) 레이는 서운하다
+        economy.touch_activity(con)
         days, pen = economy.settle_neglect(con)
         true(days >= 29 and pen < 0, f"방치가 감점되지 않았다 ({days}, {pen})")
         true(pen >= config.AFF_NEGLECT_CAP, "상한을 넘어 깎았다")
         _, pen2 = economy.settle_neglect(con)
         eq(pen2, 0, "같은 방치를 두 번 감점")
-        economy.touch_activity(con)
+        economy.touch_seen(con)
         eq(economy.settle_neglect(con), (0, 0), "복귀 후에도 방치로 봤다")
         eq(db.geti(con, "neglect_total"), 0, "복귀했는데 누적이 리셋 안 됨")
+        # 만난 적 없는 사람은 서운할 이유가 없다
+        db.put(con, "last_seen", "", char="misato")
+        eq(economy.settle_neglect(con, char="misato"), (0, 0),
+           "한 번도 안 만난 사람이 방치 감점을 받았다")
 
 
 @check("지루함 — 2글자 정상어는 통과, 성의 없는 것만 잡는다")
@@ -1071,7 +1077,7 @@ def _():
         def available(self):
             return True, ""
 
-        def complete(self, system, user, timeout=None):
+        def complete(self, system, user, timeout=None, schema=None):
             return '{"line": "응.", "affection_delta": 99}'
 
     orig = llm.current
@@ -1086,6 +1092,861 @@ def _():
             eq(llm.normalize(got, clamp=3)["affection_delta"], 3, "클램프")
     finally:
         llm.current = orig
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  락 · 트랜잭션 — eva 를 켜 둬도 훅이 막히지 않는다
+# ═══════════════════════════════════════════════════════════════════════
+def _fake_provider(reply=None, *, seen=None, schema_seen=None):
+    """가짜 프로바이더. reply 는 dict 또는 (system, user, schema) → dict."""
+    from nervterm import llm
+
+    class Fake(llm.Provider):
+        id = "fake"
+        label = "fake"
+        billing = llm.BILLING_NONE
+
+        def __init__(self):
+            super().__init__({})
+
+        def available(self):
+            return True, ""
+
+        def complete(self, system, user, *, timeout=None, schema=None):
+            self.calls = 1
+            if seen is not None:
+                seen.append((system, user, schema))
+            got = reply(system, user, schema) if callable(reply) else reply
+            return json.dumps(got if got is not None else {
+                "line": "…그래.", "emotion": "neutral"}, ensure_ascii=False)
+    return Fake
+
+
+def _with_provider(klass, fn):
+    from nervterm import llm
+    orig = llm.current
+    llm.current = lambda: klass()
+    try:
+        return fn()
+    finally:
+        llm.current = orig
+
+
+def _hook(payload: dict) -> float:
+    """실제 훅을 프로세스로 띄운다. 걸린 시간(초)."""
+    import subprocess
+    import time
+    t = time.monotonic()
+    subprocess.run([sys.executable, "-m", "nervterm", "hook"],
+                   input=json.dumps(payload), text=True, cwd=str(ROOT),
+                   timeout=30, env={**os.environ})
+    return time.monotonic() - t
+
+
+@check("락 — 게임이 화면을 그리고 기다리는 동안 훅이 막히지 않는다")
+def _():
+    from nervterm import characters, db, game, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("rei")
+        db.set_char(char.id)
+        g = game.Game(con, char, offline=True, animate=False)
+        g.state()                 # redraw() 가 입력 대기 직전에 부르는 것
+        true(not con.in_transaction, "화면을 그린 뒤 쓰기 트랜잭션이 열려 있다")
+        before = db.geti(con, "lcl")
+        took = _hook({"hook_event_name": "PostToolUse", "tool_name": "Edit",
+                      "tool_input": {}, "tool_response": {},
+                      "session_id": "lock"})
+        true(took < 1.5, f"훅이 {took:.1f}초 막혔다")
+        true(db.geti(con, "lcl") > before, "게임이 켜진 동안 적립이 사라졌다")
+
+
+@check("락 — LLM 응답을 기다리는 동안 쓰기 락을 쥐지 않는다")
+def _():
+    from nervterm import db, llm, recall
+    holding = []
+
+    def reply(system, user, schema):
+        holding.append(_CON[0].in_transaction)
+        return {"line": "응."}
+    _CON = []
+    with db.session() as con:
+        db.init(con)
+        db.set_char("rei")
+        _CON.append(con)
+        recall.remember(con, "fact", "상대는 커피를 많이 마신다")
+        recall.relevant(con, "커피")          # UPDATE hits — 트랜잭션을 연다
+        _with_provider(_fake_provider(reply),
+                       lambda: llm.ask(con, "sys", "user"))
+    eq(holding, [False], "응답을 기다리는 동안 트랜잭션이 열려 있었다")
+
+
+@check("락 — daily_row 는 읽기만 한다")
+def _():
+    from nervterm import db
+    with db.session() as con:
+        db.init(con)
+        row = db.daily_row(con, "1999-01-01")
+        eq(row["tools"], 0, "없는 날은 0")
+        true(not con.in_transaction, "읽기가 트랜잭션을 열었다")
+        eq(con.execute("SELECT COUNT(*) FROM daily WHERE day='1999-01-01'"
+                       ).fetchone()[0], 0, "읽기가 행을 만들었다")
+
+
+@check("tx — 실패하면 묶은 문장이 전부 되돌려진다")
+def _():
+    from nervterm import db
+    with db.session() as con:
+        db.init(con)
+        db.put(con, "lcl", 100)
+        try:
+            with db.tx(con):
+                db.put(con, "lcl", 1)
+                raise RuntimeError("중간에 죽었다")
+        except RuntimeError:
+            pass
+        eq(db.geti(con, "lcl"), 100, "절반만 반영됐다")
+
+
+@check("bump — 한 문장이라 상하한도 그 안에서 지킨다")
+def _():
+    from nervterm import db
+    with db.session() as con:
+        db.init(con)
+        db.set_char("rei")
+        db.put(con, "patience", 95)
+        eq(db.bump(con, "patience", 30, lo=0, hi=100), 100, "상한")
+        eq(db.bump(con, "patience", -500, lo=0, hi=100), 0, "하한")
+        eq(db.bump(con, "새키", 3), 3, "없던 키")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  기억 압축 — 스키마를 강제하는 프로바이더에서도
+# ═══════════════════════════════════════════════════════════════════════
+@check("기억 압축 — facts 스키마로 부르고, 실패하면 표시를 옮기지 않는다")
+def _():
+    from nervterm import characters, db, game, llm, world
+    world.load(refresh=True)
+    seen = []
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("rei")
+        db.set_char(char.id)
+        for i in range(32):
+            db.say(con, "user" if i % 2 == 0 else "rei", f"말 {i}번째", "", "s")
+        mark0 = db.geti(con, "consolidated_upto")
+        g = game.Game(con, char, offline=False, animate=False, headless=True)
+
+        # 1) 프로바이더가 엉뚱한 모양을 내면(스키마 강제 실패) 표시 유지
+        _with_provider(_fake_provider({"line": "캐릭터 응답 모양"}, seen=seen),
+                       g.consolidate)
+        true(seen[-1][2] is llm.FACTS_SCHEMA, "facts 스키마로 부르지 않았다")
+        eq(db.geti(con, "consolidated_upto"), mark0,
+           "실패했는데 표시를 옮겨 그 대화가 영영 기억이 못 된다")
+
+        # 2) 제대로 오면 기억이 생기고 약속에는 대상이 붙는다
+        facts = {"facts": [
+            {"text": "다음에 수족관에 같이 가기로 했다", "kind": "promise",
+             "target": "date:aquarium"},
+            {"text": "상대는 고양이 두 마리를 키운다", "kind": "fact",
+             "target": ""}]}
+        made = _with_provider(_fake_provider(facts), g.consolidate)
+        eq(made, 2, "만든 기억 수")
+        true(db.geti(con, "consolidated_upto") > mark0, "표시가 안 옮겨졌다")
+        row = con.execute("SELECT target FROM memory WHERE kind='promise' "
+                          "AND text=? AND char='rei'",
+                          ("다음에 수족관에 같이 가기로 했다",)).fetchone()
+        eq(row["target"], "date:aquarium", "약속의 이행 대상")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  근무 일지 — 날짜는 로컬 기준
+# ═══════════════════════════════════════════════════════════════════════
+@check("근무 일지 — UTC 시각을 로컬 날짜로 (한국 오전 근무가 '어제' 가 되지 않는다)")
+def _():
+    import time
+    from nervterm import agents
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Seoul"
+    time.tzset()
+    try:
+        day, ts = agents.local_time("2026-08-21T23:30:00.123Z")
+        eq(day, "2026-08-22", "UTC 23:30 은 한국 08:30 — 다음 날")
+        true(ts.startswith("2026-08-22T08:30"), f"로컬 시각: {ts}")
+        got = agents.get("claude").harvest(
+            {"type": "user", "promptSource": "typed",
+             "timestamp": "2026-08-21T23:30:00Z",
+             "message": {"content": "아침에 친 프롬프트"}}, "s")
+        eq({d for d, *_ in got}, {"2026-08-22"}, "harvest 의 날짜")
+        got = agents.get("codex").harvest(
+            {"timestamp": "2026-08-21T23:30:00Z", "type": "event_msg",
+             "payload": {"type": "user_message", "message": "코덱스 아침"}},
+            "s")
+        eq({d for d, *_ in got}, {"2026-08-22"}, "Codex harvest 의 날짜")
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  조사
+# ═══════════════════════════════════════════════════════════════════════
+@check("조사 — 받침 있는 이름이 와도 프롬프트 문장이 안 깨진다")
+def _():
+    from nervterm import characters, persona, spec
+    from nervterm.hangul import josa
+    for word, pair, want in (("렘", "이/가", "렘이"), ("레이", "이/가", "레이가"),
+                             ("람", "으로서/로서", "람으로서"),
+                             ("서울", "으로/로", "서울로"),
+                             ("동화", "이/가", "동화가"),
+                             ("LCL", "이/가", "LCL이"),
+                             ("미사토", "과/와", "미사토와")):
+        eq(josa(word, pair), want, f"{word}+{pair}")
+    rei = characters.get("rei")
+    rem = spec.Character(**{**rei.__dict__, "id": "rem", "name": "렘"})
+    text = persona.rules(rem) + persona.impression_rules("렘")
+    for bad in ("렘가 ", "렘는 ", "렘를 ", "렘로서"):
+        true(bad not in text, f"'{bad}' 가 프롬프트에 남았다")
+    true("렘은 비위를" in text, "은/는")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  약속 — 지킬 수 있다
+# ═══════════════════════════════════════════════════════════════════════
+def _fresh_promises(con, char):
+    """시험끼리 저장소를 같이 쓴다 — 앞 시험의 약속이 끼지 않게."""
+    from nervterm import db
+    db.set_char(char)
+    con.execute("DELETE FROM memory WHERE player=? AND char=? "
+                "AND kind='promise'", (db.PLAYER, char))
+
+
+def _promise_age(con, pid, days=0, hours=0):
+    import datetime
+    ts = (datetime.datetime.now() - datetime.timedelta(days=days, hours=hours)
+          ).isoformat(timespec="seconds")
+    con.execute("UPDATE memory SET ts=? WHERE id=?", (ts, pid))
+
+
+@check("약속 — 약속한 곳에 가고 약속한 것을 주면 지킨 것이다")
+def _():
+    from nervterm import characters, config, db, stance
+    with db.session() as con:
+        db.init(con)
+        _fresh_promises(con, "rei")
+        rei = characters.get("rei")
+        db.put(con, "trust", 30)
+        pid = stance.make_promise(con, "다음에 옥상에 같이 간다", "date:roof", rei)
+        true(pid, "약속이 안 생겼다")
+        eq(stance.fulfil(con, "date", "aquarium"), [], "다른 곳은 아니다")
+        eq(stance.fulfil(con, "date", "roof"), ["다음에 옥상에 같이 간다"],
+           "약속한 곳에 갔는데 지킨 걸로 안 쳤다")
+        eq(db.geti(con, "trust"), 30 + config.TRUST_KEPT_PROMISE, "보상")
+        eq(stance.open_promises(con), [], "지킨 약속이 남아 있다")
+        gid = stance.make_promise(con, "목도리를 사다 준다", "gift:scarf", rei)
+        eq(stance.fulfil(con, "gift", "scarf"), ["목도리를 사다 준다"], "선물")
+        true(gid, "선물 약속")
+        # 모르는 대상은 말로만 한 약속으로
+        eq(stance.clean_target("date:없는곳", rei), "", "모르는 장소")
+        eq(stance.clean_target("DATE:roof ", rei), "date:roof", "정규화")
+
+
+@check("약속 — '또 올게' 는 충분히 지나서 찾아와야 지킨 것이다")
+def _():
+    from nervterm import db, stance
+    with db.session() as con:
+        db.init(con)
+        _fresh_promises(con, "asuka")
+        pid = stance.make_promise(con, "내일 또 온다", "visit")
+        eq(stance.fulfil(con, "visit"), [], "약속하자마자 지킨 걸로 쳤다")
+        _promise_age(con, pid, hours=20)
+        eq(stance.fulfil(con, "visit"), ["내일 또 온다"], "다시 왔는데 안 쳐 줬다")
+
+
+@check("약속 — '쉬겠다' 는 그 밤의 근무 기록으로 판정한다")
+def _():
+    import datetime
+    from nervterm import db, stance
+    with db.session() as con:
+        db.init(con)
+        _fresh_promises(con, "misato")
+        yesterday = datetime.datetime.now() - datetime.timedelta(days=2)
+        kept = stance.make_promise(con, "오늘은 일찍 잔다", "rest")
+        broke = stance.make_promise(con, "오늘 밤엔 쉰다고 했다", "rest")
+        for pid in (kept, broke):
+            con.execute("UPDATE memory SET ts=? WHERE id=?",
+                        (yesterday.replace(hour=20).isoformat(
+                            timespec="seconds"), pid))
+        night = (yesterday + datetime.timedelta(days=1)).replace(
+            hour=3, minute=0, second=0)
+        # 두 번째 약속만 그 밤에 일했다 — 같은 밤이라 둘 다 깨져야 맞지만
+        # 시험을 위해 첫 약속의 밤을 다른 날로 민다.
+        con.execute("UPDATE memory SET ts=? WHERE id=?",
+                    ((yesterday - datetime.timedelta(days=3)).replace(
+                        hour=20).isoformat(timespec="seconds"), kept))
+        con.execute("INSERT INTO ledger(player,char,ts,kind,delta_lcl,"
+                    "delta_aff,reason) VALUES(?,?,?,?,?,?,?)",
+                    (db.PLAYER, "", night.isoformat(timespec="seconds"),
+                     "tool", 5, 0, "Edit"))
+        k, b = stance.check_rest(con)
+        eq(k, ["오늘은 일찍 잔다"], "쉰 밤을 못 알아봤다")
+        eq(b, ["오늘 밤엔 쉰다고 했다"], "새벽에 일했는데 지킨 걸로 쳤다")
+
+
+@check("약속 — 말로 한 약속만 대화로 지킬 수 있다")
+def _():
+    from nervterm import db, stance
+    with db.session() as con:
+        db.init(con)
+        _fresh_promises(con, "rei")
+        word = stance.make_promise(con, "커피를 줄이기로 했다", "")
+        act = stance.make_promise(con, "도서관에 같이 간다", "date:library")
+        eq(stance.keep_by_word(con, act), "", "행동이 필요한 약속을 말로 지켰다")
+        eq(stance.keep_by_word(con, str(word)), "커피를 줄이기로 했다",
+           "말로 한 약속")
+        eq(stance.keep_by_word(con, "99999"), "", "없는 번호")
+
+
+@check("약속 — 기한을 넘기면 감점 1회, 오래되면 잊는다")
+def _():
+    from nervterm import config, db, stance
+    with db.session() as con:
+        db.init(con)
+        _fresh_promises(con, "misato")
+        db.put(con, "trust", 60)
+        a = stance.make_promise(con, "수족관에 같이 간다")
+        b = stance.make_promise(con, "옥상에 간다", "")
+        _promise_age(con, a, days=config.PROMISE_GRACE_DAYS + 2)
+        _promise_age(con, b, days=config.PROMISE_GRACE_DAYS
+                     + config.PROMISE_FORGET_DAYS + 1)
+        eq(stance.settle_promises(con), 2, "감점 건수")
+        eq(db.geti(con, "trust"), 60 + config.TRUST_BROKEN_PROMISE * 2)
+        eq(stance.settle_promises(con), 0, "같은 약속을 두 번 감점")
+        eq([t for t, _ in stance.check_broken_promises(con)],
+           ["수족관에 같이 간다"], "기한 지난 약속이 잊히지 않았다")
+
+
+@check("약속 — 응답에 실린 약속이 생기고, 같은 말로 기한이 늘지 않는다")
+def _():
+    from nervterm import characters, db, stance
+    with db.session() as con:
+        db.init(con)
+        _fresh_promises(con, "rei")
+        rei = characters.get("rei")
+        got = stance.apply_response(con, {
+            "promise": "다음 주에 병실에 문병 온다",
+            "promise_target": "date:ward"}, rei)
+        eq(got.get("promise_made"), "다음 주에 병실에 문병 온다", "약속")
+        pid, *_ = stance.open_promises(con)[0]
+        _promise_age(con, pid, days=3)
+        again = stance.apply_response(con, {
+            "promise": "다음 주에 병실에 문병 온다", "promise_target": ""}, rei)
+        true("promise_made" not in again, "같은 약속을 새로 만들었다")
+        eq(stance.open_promises(con)[0][3], 3, "같은 말로 기한이 늘었다")
+
+
+@check("약속 — v5 승격이 옛 플래그를 상태로 옮긴다")
+def _():
+    from nervterm import db
+    with db.session() as con:
+        db.init(con)
+        con.execute("INSERT INTO memory(player,char,ts,kind,text) "
+                    "VALUES(?,?,?,?,?)", (db.PLAYER, "rei", db.now(),
+                                          "promise", "옛 약속"))
+        pid = con.execute("SELECT MAX(id) FROM memory").fetchone()[0]
+        db.flag(con, f"promise_penalized_{pid}", "1", char="rei")
+        db._upgrade_v5(con)
+        eq(con.execute("SELECT status FROM memory WHERE id=?",
+                       (pid,)).fetchone()[0], "broken", "감점된 옛 약속")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  경제 — 커밋 호감 상한
+# ═══════════════════════════════════════════════════════════════════════
+@check("경제 — 커밋 호감은 하루 상한, 만난 적 있는 사람에게만")
+def _():
+    from nervterm import config, db, economy
+    with db.session() as con:
+        db.init(con)
+        db.put(con, "met_count", 1, char="rei")
+        db.put(con, "met_count", 0, char="asuka")
+        db.put(con, "cap_commit_aff", "", char="rei")
+        rei0 = db.geti(con, "affection", char="rei")
+        asuka0 = db.geti(con, "affection", char="asuka")
+        for _ in range(10):
+            economy.on_tool(con, tool="Bash",
+                            tool_input={"command": 'git commit -m "x"'},
+                            tool_response="", ok=True)
+        eq(db.geti(con, "affection", char="rei") - rei0,
+           config.AFF_COMMIT_DAILY_MAX, "하루 상한을 넘었다")
+        eq(db.geti(con, "affection", char="asuka"), asuka0,
+           "안 만난 사람이 커밋으로 호감이 올랐다")
+
+
+@check("경제 — Codex 의 apply_patch 도 파일 수정으로 친다")
+def _():
+    from nervterm import config, db, economy
+    with db.session() as con:
+        db.init(con)
+        edits0 = db.daily_row(con)["edits"]
+        got = dict(economy.on_tool(con, tool="apply_patch",
+                                   tool_input={"command": "*** Begin Patch"},
+                                   tool_response="", ok=True))
+        eq(db.daily_row(con)["edits"], edits0 + 1, "수정 횟수")
+        true(got.get("lcl", 0) in (config.TOOL_REWARD["apply_patch"], 0),
+             f"적립: {got}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  근무 사건
+# ═══════════════════════════════════════════════════════════════════════
+@check("근무 사건 — 새벽·회복·종일·새 저장소를 한 번씩 남긴다")
+def _():
+    import datetime
+    from nervterm import config, db, events
+    with db.session() as con:
+        db.init(con)
+        con.execute("DELETE FROM work_events WHERE player=?", (db.PLAYER,))
+        night = datetime.datetime(2026, 9, 2, 3, 10)   # 수요일 새벽
+        got = events.after_tool(con, ok=True, tested=True, committed=False,
+                                prev_fail_streak=config.EVENT_RECOVER_FAILS,
+                                when=night)
+        true("late_night" in got, f"새벽: {got}")
+        true("recovered" in got, f"회복: {got}")
+        again = events.after_tool(con, ok=True, tested=True, committed=False,
+                                  prev_fail_streak=5, when=night)
+        eq(again, [], "같은 날 같은 사건을 또 남겼다")
+
+        # 새 저장소 — 설치 직후에는 알리지 않는다
+        db.put(con, "created", db.now())
+        eq(events.after_tool(con, ok=True, tested=False, committed=False,
+                             prev_fail_streak=0, cwd="/x/첫저장소"), [],
+           "설치 직후의 저장소를 새것이라 했다")
+        old = (datetime.datetime.now() - datetime.timedelta(days=30)
+               ).isoformat(timespec="seconds")
+        db.put(con, "created", old)
+        got = events.after_tool(con, ok=True, tested=False, committed=False,
+                                prev_fail_streak=0, cwd="/x/둘째저장소")
+        true("new_project" in got, f"새 저장소: {got}")
+        eq(events.after_tool(con, ok=True, tested=False, committed=False,
+                             prev_fail_streak=0, cwd="/x/둘째저장소"), [],
+           "아는 저장소를 또 새것이라 했다")
+        true(events.streak(con, 7), "연속 접속 고비")
+        true(not events.streak(con, 8), "고비가 아닌 날")
+        lines = events.lines(events.recent(con, days=4000))
+        true(any("새벽 3시" in x for x in lines), f"줄: {lines}")
+
+
+@check("근무 사건 — 훅이 실제로 남기고, 상태줄에 한 마디를 건다")
+def _():
+    from nervterm import characters, db, widget, world
+    w = world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        rei = characters.get("rei")
+        widget.remember(con, rei, w, "관심")
+        db.put(con, "widget_quip_ts", "", char="rei")
+    _hook({"hook_event_name": "Stop", "session_id": "q"})
+    with db.session() as con:
+        quip = db.get(con, "widget_quip", char="rei")
+        true(quip in rei.quips["stop"], f"Stop 한 마디: {quip!r}")
+    got = widget.render()
+    true(quip in got, "상태줄이 새 한 마디를 안 보여준다")
+
+
+@check("상태줄 — 단계는 그 자리에서 계산한다 (훅이 호감을 바꿔도 맞다)")
+def _():
+    from nervterm import characters, db, widget, world
+    w = world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        rei = characters.get("rei")
+        db.put(con, "affection", 3, char="rei")
+        widget.remember(con, rei, w, "무관심")
+        db.put(con, "affection", 70, char="rei")     # 게임을 끈 뒤 바뀜
+    true("애착" in widget.render(), "캐시된 옛 단계가 떴다")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  방치 — 일은 했는데 안 찾아왔다
+# ═══════════════════════════════════════════════════════════════════════
+@check("방치 — 안 찾아온 동안 단말에서 일한 날을 센다")
+def _():
+    import datetime
+    from nervterm import db, economy
+    with db.session() as con:
+        db.init(con)
+        db.set_char("asuka")
+        last = datetime.datetime.now() - datetime.timedelta(days=5)
+        db.put(con, "last_seen", last.isoformat(timespec="seconds"))
+        for back in (4, 3, 2):
+            day = (datetime.date.today()
+                   - datetime.timedelta(days=back)).isoformat()
+            db.daily_bump(con, "tools", 10, day=day)
+        eq(economy.worked_while_away(con), 3, "일한 날 수")
+        economy.touch_seen(con)
+        eq(economy.worked_while_away(con), 0, "찾아왔는데도 센다")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  eva say — 게임과 같은 규칙을 지난다
+# ═══════════════════════════════════════════════════════════════════════
+@check("eva say — 지루함 감점과 인내 회복이 똑같이 적용된다")
+def _():
+    import datetime
+    from nervterm import characters, config, db, game, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("misato")
+        db.set_char(char.id)
+        db.put(con, "patience", 20)
+        db.put(con, "interest", 50)
+        db.put(con, "patience_ts", (datetime.datetime.now()
+                                    - datetime.timedelta(hours=5)
+                                    ).isoformat(timespec="seconds"))
+        g = game.Game(con, char, offline=True, animate=False, headless=True)
+        g.settle()
+        true(db.geti(con, "patience") > 20, "say 경로에서 인내가 안 돈다")
+        i0 = db.geti(con, "interest")
+        g.talk("ㅇㅇ")
+        eq(db.geti(con, "interest"), i0 + config.INTEREST_BORING,
+           "say 경로에서 지루함 감점이 빠졌다")
+        true(any(e.role == "rei" for e in g.buf), "대답이 없다")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  캐릭터 간 인지
+# ═══════════════════════════════════════════════════════════════════════
+@check("캐릭터 간 인지 — 같은 세계 사람만, 보이는 일만 안다")
+def _():
+    from nervterm import characters, db, settings, social, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        con.execute("DELETE FROM social WHERE player=?", (db.PLAYER,))
+        db.put(con, "last_seen", "", char="asuka")
+        social.log(con, "rei", "date", "aquarium", "수족관")
+        social.log(con, "rei", "gift", "scarf", "목도리")
+        asuka = characters.get("asuka")
+        text = social.block(con, asuka)
+        true("레이와 수족관에 갔다" in text, f"데이트: {text}")
+        true("목도리를 줬다" in text, "선물")
+        true("인형" in text, "아스카의 태도 지침이 안 실렸다")
+        eq(social.block(con, characters.get("emilia")), "",
+           "다른 세계 사람이 알았다")
+        settings.put("social.aware", False)
+        try:
+            eq(social.block(con, asuka), "", "꺼도 실렸다")
+        finally:
+            settings.put("social.aware", True)
+
+
+@check("캐릭터 간 인지 — 지난번에 만난 뒤의 일만")
+def _():
+    import datetime
+    from nervterm import characters, db, social
+    with db.session() as con:
+        db.init(con)
+        con.execute("DELETE FROM social WHERE player=?", (db.PLAYER,))
+        social.log(con, "misato", "date", "jazz", "재즈 바")
+        db.put(con, "last_seen", (datetime.datetime.now()
+                                  + datetime.timedelta(minutes=1)
+                                  ).isoformat(timespec="seconds"), char="rei")
+        true("재즈 바" not in social.block(con, characters.get("rei")),
+             "이미 만난 뒤에 알았던 일을 또 꺼낸다")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  프롬프트 — 고정부가 앞, 캐시가 맞는다
+# ═══════════════════════════════════════════════════════════════════════
+@check("프롬프트 — 고정부는 턴마다 바이트 단위로 같다")
+def _():
+    from nervterm import characters, db, game, world
+    world.load(refresh=True)
+    seen = []
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("rei")
+        db.set_char(char.id)
+        g = game.Game(con, char, offline=False, animate=False, headless=True)
+        _with_provider(_fake_provider(seen=seen), lambda: (
+            g.talk("안녕"), g.talk("오늘 좀 힘들었어")))
+    first, second = seen[0][0], seen[1][0]
+    true(isinstance(first, list) and len(first) == 2, "두 조각이 아니다")
+    eq(first[0], second[0], "고정부가 턴마다 바뀐다 — 캐시가 안 맞는다")
+    true("[출력 형식" in first[0], "출력 규칙이 고정부에 없다")
+    true("[지금]" in first[1] and "[지금]" not in first[0], "시각은 가변부")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  HTTP 프로바이더 — 재시도와 요청 모양
+# ═══════════════════════════════════════════════════════════════════════
+@check("Anthropic — 캐시 표시·effort·구조화 출력, 4xx 에만 맨몸 재시도")
+def _():
+    from nervterm.llm import base, http
+    sent = []
+
+    def fake_post(url, payload, headers, timeout):
+        sent.append(payload)
+        if len(sent) == 1:
+            return None, 400
+        return {"content": [{"type": "text", "text": '{"line":"응."}'}],
+                "stop_reason": "end_turn"}, 200
+    orig = http._post
+    http._post = fake_post
+    try:
+        p = http.AnthropicAPI({})
+        os.environ["ANTHROPIC_API_KEY"] = "test"
+        got = p.complete(["고정", "가변"], "user", schema=base.FACTS_SCHEMA)
+    finally:
+        http._post = orig
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+    eq(got, '{"line":"응."}', "응답")
+    first = sent[0]
+    eq(first["system"][0]["cache_control"], {"type": "ephemeral"}, "캐시 표시")
+    eq(first["output_config"]["format"]["schema"], base.FACTS_SCHEMA,
+       "호출한 스키마가 아니다")
+    eq(first["output_config"]["effort"], "low", "effort")
+    true("output_config" not in sent[1], "재시도는 맨몸이어야 한다")
+    eq(p.calls, 2, "요청 수")
+
+
+@check("Ollama — 타임아웃은 다시 보내지 않는다 (240초를 두 번 기다리지 않게)")
+def _():
+    from nervterm.llm import http
+    sent = []
+
+    def fake_post(url, payload, headers, timeout):
+        sent.append(payload)
+        return None, 0                  # 연결 실패·타임아웃
+    orig = http._post
+    http._post = fake_post
+    try:
+        p = http.Ollama({"models": {"ollama": "x"}})
+        eq(p.complete("s", "u"), None, "실패")
+    finally:
+        http._post = orig
+    eq(len(sent), 1, "타임아웃 뒤에 또 보냈다")
+
+
+@check("유료 상한 — 재시도한 요청도 센다")
+def _():
+    from nervterm import db, llm
+    from nervterm.llm import guard
+
+    class Paid(llm.Provider):
+        id = "paid"
+        label = "paid"
+        billing = llm.BILLING_API
+
+        def __init__(self):
+            super().__init__({})
+
+        def available(self):
+            return True, ""
+
+        def complete(self, system, user, *, timeout=None, schema=None):
+            self.calls = 2
+            return '{"line":"응."}'
+    with db.session() as con:
+        db.init(con)
+        before = guard.used_today(con)
+        _with_provider(Paid, lambda: llm.ask(con, "s", "u"))
+        eq(guard.used_today(con), before + 2, "돈이 나간 요청 수와 다르다")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  캐릭터 계약 — 새 필드
+# ═══════════════════════════════════════════════════════════════════════
+@check("캐릭터 계약 — 돌봄·에피소드·한 마디·금지 표현을 검사한다")
+def _():
+    from nervterm import characters, spec
+    rei = characters.get("rei")
+
+    def broken(**over):
+        clone = spec.Character(**{**rei.__dict__, **over})
+        try:
+            spec.validate_character(clone)
+        except spec.SpecError as exc:
+            return str(exc)
+        return ""
+    true(broken(quips={"comit": ["오타"]}), "모르는 한 마디 종류를 통과시켰다")
+    true(broken(episodes=[("a", "b", 1, 2, 3)]), "모자란 에피소드")
+    true(broken(care={"x": ("이름", 0, 3, "의미")}), "가격 0 인 돌봄")
+    true(broken(forbidden="[깨진"), "깨진 정규식")
+    eq(broken(), "", "멀쩡한 걸 거부했다")
+    for cid in characters.IDS:
+        c = characters.get(cid)
+        for kind in spec.QUIP_KINDS:
+            true(c.quips.get(kind), f"{cid}: '{kind}' 한 마디가 없다")
+        import re
+        pattern = re.compile(c.forbidden) if c.forbidden else None
+        for kind, lines in c.quips.items():
+            for line in lines:
+                true(pattern is None or not pattern.search(line),
+                     f"{cid} 의 한 마디가 자기 말투 규칙을 어긴다: {line}")
+
+
+@check("돌봄 — 사면 며칠 살아 있고, 그동안 관심이 식지 않는다")
+def _():
+    from nervterm import characters, db, game, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("rei")
+        db.set_char(char.id)
+        db.put(con, "lcl", 1000)
+        db.put(con, "care_water", "")
+        g = game.Game(con, char, offline=True, animate=False, headless=True)
+        g.care("water")
+        active = g.care_active()
+        eq([k for k, *_ in active], ["water"], "돌봄이 안 켜졌다")
+        eq(active[0][2], char.care["water"][2] - 1, "남은 일수")
+        g.care("water")                # 이어서 하면 늘어난다
+        eq(g.care_active()[0][2], char.care["water"][2] * 2 - 1, "연장")
+        true(g.patience_boost() > 1, "인내 회복 배율")
+
+
+@check("에피소드 — 순서대로 열리고, 한 번뿐이다")
+def _():
+    from nervterm import characters, db, game, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("asuka")
+        db.set_char(char.id)
+        for key, *_ in char.episodes:
+            db.flag(con, f"episode_done_{key}", "")
+        db.put(con, "affection", 100)
+        db.put(con, "trust", 100)
+        db.put(con, "patience", 100)
+        db.put(con, "interest", 100)
+        db.put(con, "lcl", 10000)
+        g = game.Game(con, char, offline=True, animate=False, headless=True)
+        items = g.episode_items(g.state())
+        eq([opened for _, opened, _, _ in items], [True, False, False],
+           "앞의 이야기 없이 뒤가 열렸다")
+        g.pick_action = lambda choices: choices[0]
+        g.episode(char.episodes[0][0])
+        true(db.flag(con, f"episode_done_{char.episodes[0][0]}"),
+             "끝까지 했는데 완료가 아니다")
+        items = g.episode_items(g.state())
+        eq([opened for _, opened, _, _ in items], [True, True, False],
+           "다음 이야기가 안 열렸다")
+        money = db.geti(con, "lcl")
+        g.episode(char.episodes[0][0])
+        eq(db.geti(con, "lcl"), money, "이미 한 이야기에 값을 받았다")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  독립 검토에서 나온 것 — 실제 흐름(Game)으로 시험한다
+# ═══════════════════════════════════════════════════════════════════════
+@check("방치 — 한 번 길게 비운 뒤에도 다음 부재는 다시 감점된다")
+def _():
+    import datetime
+    from nervterm import characters, db, game, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("rei")
+        db.set_char(char.id)
+
+        def absent(days):
+            db.put(con, "last_seen", (datetime.datetime.now()
+                                      - datetime.timedelta(days=days)
+                                      ).isoformat(timespec="seconds"))
+            db.put(con, "affection", 50)
+            g = game.Game(con, char, offline=True, animate=False,
+                          headless=True)
+            g.settle()
+            return db.geti(con, "affection") - 50
+        true(absent(10) < 0, "긴 부재")
+        true(absent(5) < 0, "그보다 짧은 다음 부재가 감점되지 않았다")
+        true(absent(12) < 0, "그 다음 부재도")
+
+
+@check("캐릭터 간 인지 — 찾아온 뒤에도 그 전에 남들과 있었던 일이 실린다")
+def _():
+    import datetime
+    from nervterm import characters, db, game, social, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        con.execute("DELETE FROM social WHERE player=?", (db.PLAYER,))
+        db.put(con, "last_seen", (datetime.datetime.now()
+                                  - datetime.timedelta(days=2)
+                                  ).isoformat(timespec="seconds"),
+               char="asuka")
+        social.log(con, "rei", "date", "aquarium", "수족관")
+        asuka = characters.get("asuka")
+        db.set_char(asuka.id)
+        g = game.Game(con, asuka, offline=True, animate=False, headless=True)
+        g.settle()                       # last_seen 이 지금이 된다
+        ctx = g.context(g.state())
+        true("레이와 수족관에 갔다" in ctx,
+             "찾아온 순간 last_seen 이 바뀌어 남들의 일이 사라졌다")
+
+
+@check("기억 압축 — 없는 장소를 대상으로 한 약속은 말로 한 약속이 된다")
+def _():
+    from nervterm import characters, db, game, stance, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("misato")
+        _fresh_promises(con, char.id)
+        for i in range(32):
+            db.say(con, "user" if i % 2 == 0 else "rei", f"이야기 {i}", "", "c")
+        g = game.Game(con, char, offline=False, animate=False, headless=True)
+        facts = {"facts": [
+            {"text": "다음에 놀이공원에 같이 간다", "kind": "promise",
+             "target": "date:themepark"},
+            {"text": "오늘 밤엔 일찍 자기로 했다", "kind": "promise",
+             "target": "rest"},
+            {"text": "포장마차에 같이 가기로 했다", "kind": "promise",
+             "target": "date:yatai"}]}
+        _with_provider(_fake_provider(facts), g.consolidate)
+        got = {text: target for _p, text, target, _a
+               in stance.open_promises(con)}
+        eq(got.get("다음에 놀이공원에 같이 간다"), "", "없는 장소가 대상으로 남았다")
+        eq(got.get("오늘 밤엔 일찍 자기로 했다"), "",
+           "언제 한 지 모르는 '쉬겠다' 를 밤으로 판정하려 했다")
+        eq(got.get("포장마차에 같이 가기로 했다"), "date:yatai", "맞는 대상")
+        pid = next(p for p, text, *_ in stance.open_promises(con)
+                   if "놀이공원" in text)
+        true(stance.keep_by_word(con, pid), "말로 지킬 길도 막혔다")
+
+
+@check("새 저장소 — 승격 직후 원래 하던 저장소, 하위 폴더는 새것이 아니다")
+def _():
+    import datetime
+    from nervterm import db, events
+    root = Path(_TMP) / "repos" / "oldrepo"
+    (root / ".git").mkdir(parents=True, exist_ok=True)
+    (root / "src").mkdir(exist_ok=True)
+    with db.session() as con:
+        db.init(con)
+        db.put(con, "created", (datetime.datetime.now()
+                                - datetime.timedelta(days=90)
+                                ).isoformat(timespec="seconds"))
+        con.execute("DELETE FROM projects WHERE player=?", (db.PLAYER,))
+        con.execute("INSERT OR IGNORE INTO work_facts(player,day,ts,kind,text)"
+                    " VALUES(?,?,?,?,?)", (db.PLAYER, "2026-01-01",
+                                           "2026-01-01T10:00:00", "project",
+                                           "oldrepo (main)"))
+        db._upgrade_v5(con)              # 승격이 기준선을 채운다
+        eq(events.after_tool(con, ok=True, tested=False, committed=False,
+                             prev_fail_streak=0, cwd=str(root)), [],
+           "원래 하던 저장소를 새것이라 했다")
+        eq(events.after_tool(con, ok=True, tested=False, committed=False,
+                             prev_fail_streak=0, cwd=str(root / "src")), [],
+           "하위 폴더를 새 저장소라 했다")
+        eq(events.project_root(str(root / "src")), str(root), "뿌리 찾기")
 
 
 # ═══════════════════════════════════════════════════════════════════════

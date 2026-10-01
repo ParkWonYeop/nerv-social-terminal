@@ -39,8 +39,11 @@ CMD = shlex.quote(str(ROOT / "eva")) + " hook"
 MANAGED = Path("/etc/claude-code/managed-settings.json")
 
 # 앵커 필수 — 없으면 mcp__foo__Read 같은 MCP 도구 이름에도 걸린다.
-TOOL_MATCHER = ("^(Bash|Edit|Write|NotebookEdit|Read|Grep|Glob|WebFetch|"
-                "WebSearch|Agent|Task|TaskCreate|TaskUpdate|Skill|TodoWrite)$")
+# apply_patch 는 Codex 의 파일 수정이다(Codex 는 Edit/Write 를 별칭으로도
+# 받지만, 정식 이름을 적어 두는 게 확실하다).
+TOOL_MATCHER = ("^(Bash|Edit|Write|NotebookEdit|apply_patch|Read|Grep|Glob|"
+                "WebFetch|WebSearch|Agent|Task|TaskCreate|TaskUpdate|Skill|"
+                "TodoWrite)$")
 
 
 def wanted_for(agent):

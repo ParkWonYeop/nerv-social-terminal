@@ -52,8 +52,27 @@ def _tool_ok(event: str, payload: dict) -> bool:
     return True
 
 
+# 도구 호출에서 생긴 일 → 상태줄 한 마디의 종류. 앞에 있는 것이 이긴다.
+_QUIP_ORDER = (
+    (("danger", None), "danger"),
+    (("event", "recovered"), "recovered"),
+    (("event", "new_project"), "new_project"),
+    (("event", "late_night"), "late"),
+    (("commit", None), "commit"),
+    (("fail", None), "fail"),
+)
+
+
+def _quip_kind(results) -> str:
+    for (kind, value), quip in _QUIP_ORDER:
+        for k, v in results:
+            if k == kind and (value is None or v == value):
+                return quip
+    return ""
+
+
 def _run(payload: dict) -> None:
-    from . import db, economy
+    from . import db, economy, widget
 
     event = payload.get("hook_event_name", "")
     sid = payload.get("session_id", "") or ""
@@ -66,31 +85,40 @@ def _run(payload: dict) -> None:
             tool = payload.get("tool_name", "") or ""
             ti = payload.get("tool_input") or {}
             economy.roll_day(con)
-            events = economy.on_tool(
+            results = economy.on_tool(
                 con, tool=tool, tool_input=ti if isinstance(ti, dict) else {},
                 tool_response=payload.get("tool_response"),
                 ok=_tool_ok(event, payload), session_id=sid,
+                cwd=str(payload.get("cwd") or ""),
             )
             economy.touch_activity(con)
-            _debug(f"{event} {tool} -> {events}")
+            kind = _quip_kind(results)
+            if kind:
+                widget.quip(con, kind, force=(kind == "danger"))
+            _debug(f"{event} {tool} -> {results}")
 
         elif event == "Stop":
             economy.roll_day(con)
             got = economy.on_stop(con, sid)
             economy.touch_activity(con)
+            widget.quip(con, "stop")
             _debug(f"Stop -> +{got}")
 
         elif event == "SessionStart":
-            # 방치는 캐릭터마다 따로 서운해한다
-            settled = [economy.settle_neglect(con, char=c)
-                       for c in db.known_chars(con)]
+            # 방치는 여기서 매기지 않는다 — 그 캐릭터를 찾아갔을 때
+            # 게임이 '마지막으로 만난 뒤' 를 기준으로 매긴다.
             streak, bonus = economy.roll_day(con)
             economy.touch_activity(con)
-            _debug(f"SessionStart neglect={settled} streak={streak}/+{bonus}")
+            _debug(f"SessionStart streak={streak}/+{bonus}")
 
         elif event == "SessionEnd":
             economy.touch_activity(con)
             _debug("SessionEnd")
+
+        elif event == "Notification":
+            # 에이전트가 사람을 기다린다(권한 요청 등). 작업 실적은 아니다.
+            widget.quip(con, "notify")
+            _debug("Notification")
 
 
 def main() -> int:

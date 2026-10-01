@@ -10,6 +10,8 @@
 속성 주머니라, 필드 하나를 빠뜨리면 게임 도중에 AttributeError 가
 났다. 이제는 로드하는 순간 어느 필드가 없는지 말해 준다.
 """
+import copy
+import re
 
 
 class SpecError(ValueError):
@@ -46,7 +48,24 @@ CHARACTER_OPTIONAL = {
     "refusal_trust": ("", "…아직은 아니야."),
     "refusal_default": ("", "…아니야."),
     "greet_narr": ("",),
+    # 돌봄 — 반복해서 쓰는 소모품. 며칠 동안 효과가 남는다.
+    #   {key: (이름, 가격, 지속 일수, 이게 이 사람에게 갖는 의미 — LLM 에 전달)}
+    "care": {},
+    # 에피소드 — 관계가 깊어져야 열리는, 한 번뿐인 이야기. 순서대로 열린다.
+    #   [(key, 제목, 가격, 필요 호감, 필요 신뢰, 전제 — LLM 에 전달)]
+    "episodes": (),
+    # 상태줄 한 마디. 훅이 LLM 없이 고른다. 종류는 QUIP_KINDS.
+    #   {종류: [대사, …]}
+    "quips": {},
+    # 같은 세계의 다른 사람에 대한 태도 — 캐릭터 간 인지(social.py).
+    #   {캐릭터 id: 태도 지침}
+    "others": {},
+    # 이 사람이 절대 쓰지 않는 표현(정규식). 페르소나 평가가 쓴다.
+    "forbidden": "",
 }
+
+QUIP_KINDS = ("commit", "fail", "late", "danger", "stop", "notify",
+              "recovered", "new_project")
 
 EMOTIONS = ("neutral", "slight", "warm", "cold",
             "curious", "shaken", "annoyed", "distant")
@@ -59,7 +78,7 @@ class Character:
 
     def __init__(self, **kw):
         for key, default in CHARACTER_OPTIONAL.items():
-            kw.setdefault(key, default)
+            kw.setdefault(key, copy.copy(default))
         self.__dict__.update(kw)
         # 팩 로더가 채운다 — 어느 팩에서 왔는지
         self.pack = kw.get("pack", "")
@@ -136,6 +155,44 @@ def validate_character(char) -> None:
                 f"{who}: dates['{key}'] 는 (이름,가격,최소호감,장면) "
                 f"4개여야 한다 — 지금 {len(item)}개")
 
+    for key, item in (getattr(char, "care", None) or {}).items():
+        if len(item) != 4:
+            raise SpecError(
+                f"{who}: care['{key}'] 는 (이름,가격,지속일수,의미) "
+                f"4개여야 한다 — 지금 {len(item)}개")
+        if not (isinstance(item[1], int) and item[1] > 0
+                and isinstance(item[2], int) and item[2] > 0):
+            raise SpecError(f"{who}: care['{key}'] 의 가격·지속일수는 "
+                            f"양의 정수여야 한다")
+
+    seen = set()
+    for item in getattr(char, "episodes", None) or ():
+        if len(item) != 6:
+            raise SpecError(
+                f"{who}: episodes 의 항목은 (key,제목,가격,필요호감,필요신뢰,"
+                f"전제) 6개여야 한다 — 지금 {len(item)}개")
+        if item[0] in seen:
+            raise SpecError(f"{who}: episodes 의 key '{item[0]}' 가 겹친다")
+        seen.add(item[0])
+
+    quips = getattr(char, "quips", None) or {}
+    if not isinstance(quips, dict):
+        raise SpecError(f"{who}: quips 는 dict 여야 한다")
+    for kind, lines in quips.items():
+        if kind not in QUIP_KINDS:
+            # 오타면 그 한 마디는 영영 안 나온다 — 로드할 때 잡는다
+            raise SpecError(f"{who}: quips 의 '{kind}' 는 모르는 종류다 "
+                            f"({', '.join(QUIP_KINDS)})")
+        if not lines or not all(isinstance(x, str) and x for x in lines):
+            raise SpecError(f"{who}: quips['{kind}'] 는 대사 목록이어야 한다")
+
+    pattern = getattr(char, "forbidden", "") or ""
+    if pattern:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise SpecError(f"{who}: forbidden 정규식이 깨졌다 — {exc}")
+
 
 def stage_of(char, aff: int):
     """호감도 → (이름, 태도 지침, 단계 인덱스)"""
@@ -182,7 +239,8 @@ class World:
         if self.work_framing:
             out.append(f"- {self.work_framing}")
         else:
-            out.append(f"- {char_name}는 상대의 근무 기록을 알고 있다. "
+            from .hangul import josa
+            out.append(f"- {josa(char_name, '은/는')} 상대의 근무 기록을 알고 있다. "
                        f"굳이 언급하지는 않지만, 물어보면 알고 있다고 한다.")
         return "\n".join(out)
 

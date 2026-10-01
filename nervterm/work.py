@@ -43,14 +43,16 @@ def scan(con, *, budget=MAX_BYTES_PER_SCAN) -> int:
 
 def _scan_agent(con, agent, budget) -> int:
     read_total = 0
+    # 파일마다 한 번씩 묻지 않는다 — 기록이 수천 개면 턴마다 수천 번이다.
+    known = {r["path"]: r for r in con.execute(
+        "SELECT path,offset,mtime FROM work_scan WHERE player=?",
+        (db.PLAYER,))}
     for path in agent.session_files():
         try:
             stat = path.stat()
         except OSError:
             continue
-        row = con.execute(
-            "SELECT offset,mtime FROM work_scan WHERE player=? AND path=?",
-            (db.PLAYER, str(path))).fetchone()
+        row = known.get(str(path))
         offset = row["offset"] if row else 0
         if row and stat.st_mtime <= row["mtime"] and offset >= stat.st_size:
             continue
@@ -58,6 +60,7 @@ def _scan_agent(con, agent, budget) -> int:
             offset = 0
         if read_total >= budget:
             break
+        batch = []
         try:
             # 바이너리로 읽는다 — 텍스트 모드 + errors="replace" 는 잘못된
             # 바이트 1개가 U+FFFD(재인코딩 시 3바이트)로 바뀌어 바이트
@@ -96,18 +99,37 @@ def _scan_agent(con, agent, budget) -> int:
                         facts = agent.harvest(rec, sid)
                     except Exception:
                         continue
-                    for day, ts, kind, text, fsid in facts:
-                        _add(con, day, ts, kind, text, fsid, agent.id)
+                    batch.extend(facts)
                 read_total += consumed
                 new_offset = offset + consumed
         except OSError:
             continue
-        con.execute(
-            "INSERT INTO work_scan(player,path,offset,mtime) VALUES(?,?,?,?) "
-            "ON CONFLICT(player,path) DO UPDATE SET offset=excluded.offset, "
-            "mtime=excluded.mtime",
-            (db.PLAYER, str(path), new_offset, stat.st_mtime))
+        # 파일 하나치를 짧은 트랜잭션 하나로. 읽고 파싱하는 동안에는 락을
+        # 쥐지 않는다 — 그 사이 훅이 막히면 안 된다. 사실과 읽은 위치가
+        # 함께 들어가야 다음 스캔이 같은 줄을 다시 읽지 않는다.
+        with db.tx(con):
+            for day, ts, kind, text, fsid in batch:
+                _add(con, day, ts, kind, text, fsid, agent.id)
+                if kind == "project":
+                    _seen_project(con, text, ts)
+            con.execute(
+                "INSERT INTO work_scan(player,path,offset,mtime) "
+                "VALUES(?,?,?,?) ON CONFLICT(player,path) DO UPDATE SET "
+                "offset=excluded.offset, mtime=excluded.mtime",
+                (db.PLAYER, str(path), new_offset, stat.st_mtime))
     return read_total
+
+
+def _seen_project(con, label, ts):
+    """이미 아는 작업 디렉터리로 적어 둔다 — '새 저장소' 사건의 기준선.
+
+    훅이 처음 보는 디렉터리를 새 저장소로 알리는데, 기록에 이미 있는
+    곳은 새것이 아니다.
+    """
+    name = agents.project_name(label)
+    if name:
+        con.execute("INSERT OR IGNORE INTO projects(player,name,first_ts) "
+                    "VALUES(?,?,?)", (db.PLAYER, name, ts or db.now()))
 
 
 def facts(con, day=None, kind=None, limit=40):

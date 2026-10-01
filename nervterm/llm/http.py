@@ -6,6 +6,10 @@
 **API 키를 설정 파일에 저장하지 않는다.** 설정에는 '어느 환경변수에서
 키를 읽을지' 이름만 넣는다. 키가 평문으로 홈에 굴러다니면 안 되고,
 저장소를 통째로 복사·백업하는 사람도 있다.
+
+**재시도는 서버가 요청 모양을 거절했을 때(4xx)만 한다.** 타임아웃이나
+연결 실패까지 다시 보내면 로컬 모델은 240초를 두 번 기다리고(8분 정지),
+유료 API 는 같은 요청 값을 두 번 낸다.
 """
 import json
 import os
@@ -13,10 +17,14 @@ import urllib.error
 import urllib.request
 
 from .base import (BILLING_API, BILLING_NONE, Provider, RESPONSE_SCHEMA,
-                   is_local_url)
+                   flatten, is_local_url)
+
+# 4xx 중에서도 이건 모양 문제가 아니다 — 다시 보내도 똑같이 실패한다.
+_NO_RETRY = {401, 403, 404, 429}
 
 
 def _post(url, payload, headers, timeout):
+    """(응답 JSON 또는 None, HTTP 상태). 상태 0 은 연결·타임아웃 실패."""
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
@@ -24,10 +32,16 @@ def _post(url, payload, headers, timeout):
         req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8", "replace"))
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            json.JSONDecodeError, ValueError):
-        return None
+            return json.loads(resp.read().decode("utf-8", "replace")), 200
+    except urllib.error.HTTPError as exc:
+        return None, exc.code
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
+        return None, 0
+
+
+def reshape_worth_retry(status: int) -> bool:
+    """요청 모양을 바꿔 한 번 더 보낼 만한 실패인가."""
+    return 400 <= status < 500 and status not in _NO_RETRY
 
 
 class _KeyedProvider(Provider):
@@ -46,6 +60,10 @@ class _KeyedProvider(Provider):
             return False, f"환경변수 {self.key_env} 가 비어 있다"
         return True, ""
 
+    def _send(self, url, payload, headers, timeout):
+        self.calls += 1
+        return _post(url, payload, headers, timeout)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Anthropic API
@@ -53,25 +71,62 @@ class _KeyedProvider(Provider):
 class AnthropicAPI(_KeyedProvider):
     id = "anthropic-api"
     label = "Anthropic API (키)"
-    default_model = "claude-sonnet-5"
+    default_model = "claude-sonnet-5-5"
     default_base_url = "https://api.anthropic.com"
     default_key_env = "ANTHROPIC_API_KEY"
     wants_base_url = True
     note = "토큰당 청구된다. 구독 좌석과는 별개의 지갑이다."
 
-    def complete(self, system, user, *, timeout=None):
-        got = _post(
-            f"{self.base_url.rstrip('/')}/v1/messages",
-            {
-                "model": self.model,
-                "max_tokens": 700,
-                "system": system,
-                "messages": [{"role": "user", "content": user}],
-            },
-            {"x-api-key": self.api_key(),
-             "anthropic-version": "2023-06-01"},
-            timeout or self.timeout)
-        if not got:
+    # 대사 한 줄이면 수백 토큰이다. 그런데 현행 모델은 thinking 을
+    # 생략하면 adaptive 로 생각부터 하고, 그 토큰도 이 상한에 들어간다.
+    # 700 으로 두면 대사를 쓰기도 전에 상한에 닿아 빈 응답(→ 폴백 대사)이
+    # 나올 수 있었다. 여유를 두고, 생각의 깊이는 effort 로 줄인다.
+    MAX_TOKENS = 2000
+    EFFORT = "low"
+
+    def _system_blocks(self, system):
+        """[고정부, 가변부] 면 고정부에 캐시 표시를 단다.
+
+        고정부(페르소나·세계·출력 규칙)는 턴마다 바이트 단위로 같다.
+        가변부(시각·상태·기억)만 바뀐다. 접두사 캐시라서 순서가 중요하다.
+        """
+        if isinstance(system, (list, tuple)) and len(system) > 1:
+            blocks = [{"type": "text", "text": system[0],
+                       "cache_control": {"type": "ephemeral"}}]
+            rest = flatten(list(system[1:]))
+            if rest:
+                blocks.append({"type": "text", "text": rest})
+            return blocks
+        return flatten(system)
+
+    def payload(self, system, user, schema, *, structured=True):
+        body = {
+            "model": self.model,
+            "max_tokens": self.MAX_TOKENS,
+            "system": self._system_blocks(system),
+            "messages": [{"role": "user", "content": user}],
+        }
+        if structured:
+            body["output_config"] = {
+                "effort": self.EFFORT,
+                "format": {"type": "json_schema",
+                           "schema": schema or RESPONSE_SCHEMA},
+            }
+        return body
+
+    def complete(self, system, user, *, timeout=None, schema=None):
+        url = f"{self.base_url.rstrip('/')}/v1/messages"
+        headers = {"x-api-key": self.api_key(),
+                   "anthropic-version": "2023-06-01"}
+        wait = timeout or self.timeout
+        got, status = self._send(url, self.payload(system, user, schema),
+                                 headers, wait)
+        if got is None and reshape_worth_retry(status):
+            # 옛 모델·프록시가 output_config 를 모를 수 있다. 맨몸으로 한 번.
+            got, status = self._send(
+                url, self.payload(system, user, schema, structured=False),
+                headers, wait)
+        if not got or got.get("stop_reason") == "refusal":
             return None
         blocks = got.get("content") or []
         return "".join(b.get("text", "") for b in blocks
@@ -90,28 +145,31 @@ class OpenAIAPI(_KeyedProvider):
     wants_base_url = True
     note = "토큰당 청구된다. Codex 구독 좌석과는 별개의 지갑이다."
 
-    def _payload(self, system, user):
-        return {
+    def _payload(self, system, user, schema, *, structured=True):
+        body = {
             "model": self.model,
-            "messages": [{"role": "system", "content": system},
+            "messages": [{"role": "system", "content": flatten(system)},
                          {"role": "user", "content": user}],
-            "response_format": {
+        }
+        if structured:
+            body["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {"name": "reply", "strict": False,
-                                "schema": RESPONSE_SCHEMA},
-            },
-        }
+                                "schema": schema or RESPONSE_SCHEMA},
+            }
+        return body
 
-    def complete(self, system, user, *, timeout=None):
+    def complete(self, system, user, *, timeout=None, schema=None):
         url = f"{self.base_url.rstrip('/')}/v1/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key()}"}
-        got = _post(url, self._payload(system, user), headers,
-                    timeout or self.timeout)
-        if not got:
+        wait = timeout or self.timeout
+        got, status = self._send(url, self._payload(system, user, schema),
+                                 headers, wait)
+        if got is None and reshape_worth_retry(status):
             # 구조화 출력을 못 받아주는 서버일 수 있다. 한 번만 맨몸으로.
-            plain = self._payload(system, user)
-            plain.pop("response_format", None)
-            got = _post(url, plain, headers, timeout or self.timeout)
+            got, status = self._send(
+                url, self._payload(system, user, schema, structured=False),
+                headers, wait)
         if not got:
             return None
         try:
@@ -227,40 +285,40 @@ class Ollama(Provider):
         return [m.get("name", "") for m in (got.get("models") or [])
                 if m.get("name")]
 
-    def complete(self, system, user, *, timeout=None):
-        got = _post(
-            f"{self.base_url.rstrip('/')}/api/chat",
-            {
-                "model": self.model,
-                "stream": False,
-                # format 에 스키마를 주면 ollama 가 문법 수준에서 강제한다.
-                # 작은 모델은 부탁만으로는 JSON 을 안 지킨다.
-                "format": RESPONSE_SCHEMA,
-                # 추론 모드를 끈다. qwen3 같은 모델은 기본으로 켜져 있어서
-                # 대사 한 줄 쓰기 전에 한참 생각한다. 실측 qwen3:14b 가
-                # 30.4초 → 2.1초. 14배다.
-                #
-                # 이 게임에 추론은 필요 없다. 캐릭터는 논리 문제를 푸는 게
-                # 아니라 성격대로 반응하면 되고, 오히려 길게 생각할수록
-                # 설명조의 밋밋한 대사가 나온다.
-                "think": False,
-                "messages": [{"role": "system", "content": system},
-                             {"role": "user", "content": user}],
-                "options": {"temperature": 0.8, "num_predict": 700},
-            },
-            {}, timeout or self.timeout)
-        if not got:
-            # think 를 모르는 옛 ollama 일 수 있다. 한 번만 빼고 다시.
-            got = _post(
-                f"{self.base_url.rstrip('/')}/api/chat",
-                {
-                    "model": self.model, "stream": False,
-                    "format": RESPONSE_SCHEMA,
-                    "messages": [{"role": "system", "content": system},
-                                 {"role": "user", "content": user}],
-                    "options": {"temperature": 0.8, "num_predict": 700},
-                },
-                {}, timeout or self.timeout)
+    def payload(self, system, user, schema, *, think_flag=True):
+        body = {
+            "model": self.model,
+            "stream": False,
+            # format 에 스키마를 주면 ollama 가 문법 수준에서 강제한다.
+            # 작은 모델은 부탁만으로는 JSON 을 안 지킨다.
+            "format": schema or RESPONSE_SCHEMA,
+            "messages": [{"role": "system", "content": flatten(system)},
+                         {"role": "user", "content": user}],
+            "options": {"temperature": 0.8, "num_predict": 700},
+        }
+        if think_flag:
+            # 추론 모드를 끈다. qwen3 같은 모델은 기본으로 켜져 있어서
+            # 대사 한 줄 쓰기 전에 한참 생각한다. 실측 qwen3:14b 가
+            # 30.4초 → 2.1초. 14배다.
+            #
+            # 이 게임에 추론은 필요 없다. 캐릭터는 논리 문제를 푸는 게
+            # 아니라 성격대로 반응하면 되고, 오히려 길게 생각할수록
+            # 설명조의 밋밋한 대사가 나온다.
+            body["think"] = False
+        return body
+
+    def complete(self, system, user, *, timeout=None, schema=None):
+        url = f"{self.base_url.rstrip('/')}/api/chat"
+        wait = timeout or self.timeout
+        self.calls += 1
+        got, status = _post(url, self.payload(system, user, schema), {}, wait)
+        if got is None and reshape_worth_retry(status):
+            # think 를 모르는 옛 ollama 일 수 있다(400). 한 번만 빼고 다시.
+            # 타임아웃(상태 0)은 다시 보내지 않는다 — 240초를 또 기다린다.
+            self.calls += 1
+            got, status = _post(
+                url, self.payload(system, user, schema, think_flag=False),
+                {}, wait)
         if not got:
             return None
         return (got.get("message") or {}).get("content")
