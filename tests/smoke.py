@@ -759,6 +759,23 @@ def _():
              f"남의 훅을 우리 것으로 봤다: {other}")
 
 
+@check("훅 제거 — 우리 묶음에 사용자가 넣은 훅은 남긴다")
+def _():
+    import importlib.util
+    from nervterm import agents
+    spec = importlib.util.spec_from_file_location(
+        "_installhooks_mixed", ROOT / "install-hooks.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mine = {"type": "command", "command": "afplay /System/Sounds/Glass.aiff"}
+    cfg = {"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": "/opt/nerv/eva hook"}, mine]}]}}
+    mod.merge(cfg, agents.get("claude"), remove=True)
+    eq(cfg, {"hooks": {"Stop": [{"hooks": [mine]}]}},
+       "같은 묶음의 사용자 훅까지 지웠다")
+    true(any("afplay" in k for k in mod.survey(cfg)), "보존 목록에 안 보인다")
+
+
 @check("위험 명령 — 언급과 실행을 구분한다")
 def _():
     from nervterm import economy

@@ -83,9 +83,9 @@ def merge(cfg: dict, agent, *, remove=False):
         arr = hooks.get(event)
         if not isinstance(arr, list):
             continue
-        before = len(arr)
-        arr[:] = [e for e in arr if not agents.is_our_hook(e)]
-        if before != len(arr):
+        had = any(agents.is_our_hook(e) for e in arr)
+        arr[:] = agents.strip_ours(arr)
+        if had:
             changed.append(f"  - {event}: 기존 EVA 훅 제거")
         if not arr:
             hooks.pop(event, None)
@@ -111,9 +111,9 @@ def survey(cfg: dict):
         if not isinstance(arr, list):
             continue
         for e in arr:
-            if agents.is_our_hook(e):
-                continue
             for h in (e or {}).get("hooks", []):
+                if agents.is_our_command(h):
+                    continue
                 kept.append(f"  · {event}: {str(h.get('command'))[:70]}")
     return kept
 
