@@ -89,7 +89,7 @@ PROMISE_FORGET_DAYS = 14     # 감점 후 이만큼 더 지나면 약속을 잊�
                              # 프롬프트에 영구히 실린다(감점은 어차피 1회).
 TRUST_KEPT_PROMISE = 4       # 약속을 지키면. 어긴 것(-8)의 절반 —
 AFF_KEPT_PROMISE = 2         # 신뢰는 깨지기 쉽고 쌓기 어렵다.
-PROMISE_VISIT_MIN_HOURS = 3  # '또 올게' 는 이만큼은 지나서 와야 지킨 것
+PROMISE_VISIT_MIN_HOURS = 3  # '또 올게'·말로 한 약속은 이만큼은 지나야 지킨 것
 
 INTEREST_DECAY_PER_DAY = -2  # 안 오면 관심이 식는다
 INTEREST_BORING = -4         # 같은 말 반복 / 내용 없는 말

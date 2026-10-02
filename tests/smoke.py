@@ -1411,16 +1411,26 @@ def _():
 
 @check("약속 — 말로 한 약속만 대화로 지킬 수 있다")
 def _():
-    from nervterm import db, stance
+    from nervterm import config, db, stance
     with db.session() as con:
         db.init(con)
         _fresh_promises(con, "rei")
         word = stance.make_promise(con, "커피를 줄이기로 했다", "")
         act = stance.make_promise(con, "도서관에 같이 간다", "date:library")
         eq(stance.keep_by_word(con, act), "", "행동이 필요한 약속을 말로 지켰다")
+        eq(stance.keep_by_word(con, str(word)), "",
+           "방금 한 약속을 다음 턴에 지켰다")
+        _promise_age(con, word, hours=config.PROMISE_VISIT_MIN_HOURS)
         eq(stance.keep_by_word(con, str(word)), "커피를 줄이기로 했다",
            "말로 한 약속")
         eq(stance.keep_by_word(con, "99999"), "", "없는 번호")
+        # 하루 호감 예산이 찼으면 지킨 약속도 호감은 더 못 올린다
+        db.put(con, "cap_aff_day", f"{db.today()}:{config.AFF_DAILY_MAX}")
+        aff0 = db.geti(con, "affection")
+        late = stance.make_promise(con, "주말엔 산책을 나간다", "")
+        _promise_age(con, late, hours=config.PROMISE_VISIT_MIN_HOURS)
+        true(stance.keep_by_word(con, late), "지키지 못했다")
+        eq(db.geti(con, "affection"), aff0, "예산 밖으로 호감이 올랐다")
 
 
 @check("약속 — 기한을 넘기면 감점 1회, 오래되면 잊는다")
@@ -1976,7 +1986,7 @@ def _():
 
 @check("기억 압축 — 없는 장소를 대상으로 한 약속은 말로 한 약속이 된다")
 def _():
-    from nervterm import characters, db, game, stance, world
+    from nervterm import characters, config, db, game, stance, world
     world.load(refresh=True)
     with db.session() as con:
         db.init(con)
@@ -2001,6 +2011,7 @@ def _():
         eq(got.get("포장마차에 같이 가기로 했다"), "date:yatai", "맞는 대상")
         pid = next(p for p, text, *_ in stance.open_promises(con)
                    if "놀이공원" in text)
+        _promise_age(con, pid, hours=config.PROMISE_VISIT_MIN_HOURS)
         true(stance.keep_by_word(con, pid), "말로 지킬 길도 막혔다")
 
 
@@ -2661,6 +2672,7 @@ def _():
         for text in ("커피를 하루 두 잔으로 줄인다", "주말엔 산책을 나간다",
                      "책상 정리를 끝낸다", "편지를 써서 보낸다"):
             p = stance.make_promise(con, text, "", rei)
+            _promise_age(con, p, hours=config.PROMISE_VISIT_MIN_HOURS)
             stance.keep_by_word(con, p)
         eq(db.geti(con, "trust"),
            trust0 + config.TRUST_KEPT_PROMISE * config.PROMISE_KEPT_DAILY_MAX,
@@ -2669,13 +2681,14 @@ def _():
 
 @check("검토 — 지키거나 어긴 약속은 같은 말로 되살아나지 않는다")
 def _():
-    from nervterm import characters, db, stance
+    from nervterm import characters, config, db, stance
     with db.session() as con:
         db.init(con)
         rei = characters.get("rei")
         _reset_char(con, "rei")
         pid = stance.make_promise(con, "오늘은 일찍 잔다고 했다", "", rei)
-        stance.keep_by_word(con, pid)
+        _promise_age(con, pid, hours=config.PROMISE_VISIT_MIN_HOURS)
+        true(stance.keep_by_word(con, pid), "지키지 못했다")
         eq(stance.make_promise(con, "오늘은 일찍 잔다고 했다", "", rei), 0,
            "지킨 약속이 새 약속으로 되살아났다 — 닷새 뒤 감점")
 
@@ -2715,6 +2728,24 @@ def _():
         g.episode(key)
         eq(db.geti(con, "lcl"), after_first, "그만둔 이야기에 또 값을 받았다")
         true(after_first < 2000, "처음에는 받아야 한다")
+
+
+@check("검토 — 이야기 1막을 끊고 다시 봐도 하루 호감 예산을 넘지 않는다")
+def _():
+    from nervterm import characters, config, db, game, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("asuka")
+        key, _t, _p, need_aff, need_trust, _pr = char.episodes[0]
+        _reset_char(con, char.id, affection=need_aff, trust=max(need_trust, 50))
+        db.put(con, "lcl", 2000)
+        g = game.Game(con, char, offline=False, animate=False, headless=True)
+        g.pick_action = lambda choices: ""            # 1막에서 매번 그만둔다
+        _with_provider(_fake_provider(_GENEROUS),
+                       lambda: [g.episode(key) for _ in range(20)])
+        true(db.geti(con, "affection") - need_aff <= config.AFF_DAILY_MAX,
+             "1막 반복으로 하루 예산을 넘었다")
 
 
 @check("검토 — 연속 접속 보너스는 7일 배율에서 멈춘다")

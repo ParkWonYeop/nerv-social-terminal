@@ -216,6 +216,7 @@ def _kept(con, pid: int, text: str) -> bool:
     """지킨 약속 하나를 닫고 보상한다. 보상했으면 True.
 
     보상은 하루 PROMISE_KEPT_DAILY_MAX 건까지. 넘으면 지킨 것으로만 남는다.
+    호감은 하루 예산(aff_day) 안에서만 — 약속도 관계가 하루에 자라는 몫이다.
     """
     _set_status(con, pid, "kept")
     recall.remember(con, "event", f"상대가 약속을 지켰다: {text}", weight=3)
@@ -223,10 +224,11 @@ def _kept(con, pid: int, text: str) -> bool:
         db.log(con, "promise_kept", 0, 0, f"지킨 약속(오늘 보상 끝): {text}")
         return False
     move(con, "trust", config.TRUST_KEPT_PROMISE)
-    db.bump(con, "affection", config.AFF_KEPT_PROMISE,
-            lo=config.AFF_MIN, hi=config.AFF_MAX)
-    db.log(con, "promise_kept", 0, config.AFF_KEPT_PROMISE,
-           f"지킨 약속: {text}")
+    aff = db.capped(con, "aff_day", config.AFF_KEPT_PROMISE,
+                    config.AFF_DAILY_MAX)
+    if aff:
+        db.bump(con, "affection", aff, lo=config.AFF_MIN, hi=config.AFF_MAX)
+    db.log(con, "promise_kept", 0, aff, f"지킨 약속: {text}")
     return True
 
 
@@ -277,11 +279,13 @@ def keep_by_word(con, pid) -> str:
     except (TypeError, ValueError):
         return ""
     row = con.execute(
-        "SELECT text,target FROM memory WHERE id=? AND player=? AND char=? "
+        "SELECT ts,text,target FROM memory WHERE id=? AND player=? AND char=? "
         "AND kind='promise' AND status=''",
         (pid, db.PLAYER, db.CHAR)).fetchone()
     if row is None or row["target"]:
         return ""
+    if _age(row["ts"]) * 24 < config.PROMISE_VISIT_MIN_HOURS:
+        return ""          # 방금 한 약속을 다음 턴에 지켰다고 하면 안 된다
     return row["text"] if _kept(con, pid, row["text"]) else ""
 
 
