@@ -776,6 +776,40 @@ def _():
     true(any("afplay" in k for k in mod.survey(cfg)), "보존 목록에 안 보인다")
 
 
+@check("근무 일지 — 예산 끝자락에 걸린 평범한 줄을 초대형으로 보고 버리지 않는다")
+def _():
+    import shutil
+    import time as _time
+    from nervterm import agents, db, work
+    base = Path(_TMP) / "edge-budget"
+    proj = base / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    filler = (json.dumps({"type": "system", "text": "x" * 200}) + "\n") * 5
+    prompt = json.dumps({"type": "user", "promptSource": "typed",
+                         "timestamp": "2026-10-01T01:00:00Z",
+                         "message": {"content": "예산 끝자락의 프롬프트 " + "y" * 600}},
+                        ensure_ascii=False) + "\n"
+    (proj / "new.jsonl").write_text(filler, encoding="utf-8")
+    (proj / "old.jsonl").write_text(prompt, encoding="utf-8")
+    old_t = _time.time() - 60
+    os.utime(proj / "old.jsonl", (old_t, old_t))          # 새 것부터 읽힌다
+    claude = agents.get("claude")
+    claude.sessions_dir = lambda: base
+    try:
+        with db.session() as con:
+            db.init(con)
+            room = len(filler.encode()) + 100             # 프롬프트 줄보다 작다
+            work._scan_agent(con, claude, room)
+            work._scan_agent(con, claude, work.MAX_BYTES_PER_SCAN)
+            got = con.execute(
+                "SELECT 1 FROM work_facts WHERE player=? AND text LIKE ?",
+                (db.PLAYER, "예산 끝자락의 프롬프트%")).fetchone()
+            true(got is not None, "남은 예산보다 긴 줄을 버렸다")
+    finally:
+        del claude.sessions_dir
+        shutil.rmtree(base, ignore_errors=True)
+
+
 @check("대화 엔진 — 부모 Claude Code 세션 표식은 넘기지 않고, 인증 설정은 넘긴다")
 def _():
     from nervterm.llm import cli
