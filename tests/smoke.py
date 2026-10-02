@@ -776,6 +776,24 @@ def _():
     true(any("afplay" in k for k in mod.survey(cfg)), "보존 목록에 안 보인다")
 
 
+@check("대화 엔진 — 부모 Claude Code 세션 표식은 넘기지 않고, 인증 설정은 넘긴다")
+def _():
+    from nervterm.llm import cli
+    keep = {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "s",
+            "CLAUDE_CODE_MESSAGING_TOKEN": "t", "CLAUDE_CODE_USE_BEDROCK": "1"}
+    old = {k: os.environ.get(k) for k in keep}
+    os.environ.update(keep)
+    try:
+        env = cli._game_env()
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    eq([k for k in keep if k in env], ["CLAUDE_CODE_USE_BEDROCK"], "넘긴 것")
+
+
 @check("위험 명령 — 언급과 실행을 구분한다")
 def _():
     from nervterm import economy

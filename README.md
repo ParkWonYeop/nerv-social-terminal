@@ -1005,6 +1005,8 @@ eva --plugins       장착된 부품 확인
 | 弐拾九 | "약속할게" → "#12 지켰어" 두 턴에 호감 +2 · 신뢰 +4 | 말로 한 약속에 경과 시간이 없고, 지킨 약속 호감이 예산 밖 | 3시간 뒤부터 · 호감은 예산 안 |
 | 参拾 | `eva setup` 다시 돌리면 `/hooks` 로 넣은 내 훅이 사라짐 | 우리 명령이 든 훅 묶음을 통째로 지웠다 | 우리 명령만 뺀다 |
 | 参拾壱 | 설치·제거가 `~/.local/bin` 의 남의 `eva`·`rei` 를 덮거나 지움 | 확인 없이 `ln -sfn` · `rm -f` | 우리 링크만 건드린다 |
+| 参拾弐 | 대사 한 줄마다 `~/.claude/projects/` 에 세션 파일이 쌓임 | `claude -p` 가 세션을 저장한다 (codex 는 `--ephemeral` 이었다) | `--no-session-persistence` |
+| 参拾参 | `! eva say` 의 `claude -p` 가 지금 쓰는 Claude Code 세션의 자식으로 돔 | 부모 세션 표식(`CLAUDECODE` · `CLAUDE_CODE_SESSION_ID` …)을 물려줬다 | 표식만 빼고 넘긴다 |
 
 > **診断** — `/status` 에 이상한 감점이 보이면 `ledger` 테이블에 사유가 남아 있다.
 >
