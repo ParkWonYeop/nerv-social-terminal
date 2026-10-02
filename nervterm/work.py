@@ -14,6 +14,7 @@ import time
 from . import agents, db
 
 MAX_BYTES_PER_SCAN = 4_000_000        # 한 번에 읽을 상한(폭주 방지)
+GIANT_LINE = 1_000_000                # 개행 없이 이만큼 읽히면 파싱을 포기한다
 
 # 아직 한 번도 안 읽은 파일 중 이보다 오래된 것은 건너뛴다. 반년 전
 # 작업이 지금 대화에 나올 일은 없고, 그걸 다 읽으려 들면 밀린 기록이
@@ -106,13 +107,17 @@ def _scan_agent(con, agent, budget) -> int:
                     if cut >= 0:
                         blob = blob[:cut + 1]
                         consumed = cut + 1
-                    elif consumed == want:
+                    elif consumed == want and want >= GIANT_LINE:
                         # 개행 없는 초대형 한 줄 — 파싱을 포기하고 건너뛴다.
                         # consumed 를 유지해 offset 이 전진해야 이 파일이
                         # 매 스캔마다 예산만 태우며 멈춰 있지 않는다.
+                        # want 는 '남은 예산' 이다 — 예산 끝자락에서 평범한
+                        # 줄을 초대형으로 보고 버리면 안 된다(Codex 는 그 줄이
+                        # session_meta 라 검토 스레드 건너뛰기까지 깨졌다).
                         blob = b""
                     else:
-                        # 파일 끝이 아직 개행 전 — 쓰는 중이니 다음에 다시
+                        # 파일 끝이 아직 개행 전(쓰는 중), 또는 남은 예산이
+                        # 이 줄보다 작다 — 다음에 다시
                         blob = b""
                         consumed = 0
                 sid = agent.session_id(path)

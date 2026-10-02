@@ -239,8 +239,11 @@ class Game:
         except Exception:                                     # noqa: BLE001
             pass          # 위젯 때문에 게임이 멈추면 안 된다
 
-    def speak(self, got, *, kind="talk"):
-        """캐릭터의 발화를 화면·DB에 반영하고 관계 변화를 적용."""
+    def speak(self, got, *, kind="talk", exempt=False):
+        """캐릭터의 발화를 화면·DB에 반영하고 관계 변화를 적용.
+
+        exempt — 하루 호감 예산 밖. 이야기의 결말(한 번뿐)만 쓴다.
+        """
         con = self.con
         narration = got.get("narration", "")
         line, emotion = got.get("line", "…"), got.get("emotion", "neutral")
@@ -255,7 +258,7 @@ class Game:
         before = characters.stage_of(self.char, db.geti(con, "affection"))[2]
         with db.tx(con):
             db.say(con, "rei", line, emotion, self.sess)
-            wanted, delta = delta, self.budget_affection(delta, kind)
+            wanted, delta = delta, self.budget_affection(delta, kind, exempt)
             if delta:
                 economy.apply(con, aff=delta, kind=kind, reason=line[:60])
             moved = stance.apply_response(con, got, self.char)
@@ -286,13 +289,15 @@ class Game:
         self.remember_for_widget()
         self.redraw(animate=self.animate)
 
-    def budget_affection(self, delta: int, kind: str) -> int:
+    def budget_affection(self, delta: int, kind: str,
+                         exempt: bool = False) -> int:
         """오르는 호감을 하루 예산 안으로. 실제로 줄 양.
 
-        하루 AFF_DAILY_MAX, 그중 대화는 AFF_TALK_DAILY_MAX. 이야기는 빼 둔다 —
-        관계가 깊어져야 열리고 한 번뿐인 고비다. 깎이는 쪽은 그대로.
+        하루 AFF_DAILY_MAX, 그중 대화는 AFF_TALK_DAILY_MAX. 이야기의 결말만
+        빼 둔다 — 관계가 깊어져야 열리고 한 번뿐인 고비다. 1·2막은 중간에
+        그만두고 다시 볼 수 있으니 예산 안이다. 깎이는 쪽은 그대로.
         """
-        if delta <= 0 or kind == "episode":
+        if delta <= 0 or exempt:
             return delta
         con = self.con
         room = config.AFF_DAILY_MAX - db.cap_used(con, "aff_day")
@@ -1027,7 +1032,7 @@ class Game:
                             f"함께 겪은 일: {title}. 상대는 '{act1}', "
                             f"그리고 '{act2}' 했다.", 4)
             social.log(self.con, self.char.id, "episode", key, title)
-        self.speak(got3, kind="episode")
+        self.speak(got3, kind="episode", exempt=True)
 
     # ── 기록 화면 ──────────────────────────────────────────────────────
     def status(self):

@@ -33,8 +33,15 @@ done
 
 say() { printf '  %s\n' "$*"; }
 
+# 우리가 만든 링크인가 — 어느 클론이든 nervterm 옆의 eva/rei 를 가리키는 것.
+# 같은 이름의 남의 프로그램은 덮지도 지우지도 않는다.
+ours() { [ -L "$1" ] && [ -d "$(dirname "$(readlink "$1")")/nervterm" ]; }
+taken() { { [ -e "$1" ] || [ -L "$1" ]; } && ! ours "$1"; }
+unlink_ours() { if ours "$1"; then rm -f "$1" && say "제거: $1"; fi; }
+
 if [ "$MODE" = "uninstall" ]; then
-    rm -f "$LINK" "$OLD_LINK" && say "제거: $LINK"
+    unlink_ours "$LINK"
+    unlink_ours "$OLD_LINK"
     python3 "${ROOT}/install-hooks.py" --uninstall --agent all
     echo
     say "저장 데이터는 남겨 뒀다: ${DATA}"
@@ -71,8 +78,12 @@ python3 -c "import rich" 2>/dev/null || PY="${DATA}/venv/bin/python3"
 # 3) eva 명령 등록 (옛 rei 링크는 제거)
 mkdir -p "$BIN"
 chmod +x "${ROOT}/eva"
+if taken "$LINK"; then
+    say "${LINK} 에 다른 프로그램이 있다 — 덮지 않았다. 옮기거나 지운 뒤 다시 돌려라." >&2
+    exit 1
+fi
 ln -sfn "${ROOT}/eva" "$LINK"
-rm -f "$OLD_LINK"
+unlink_ours "$OLD_LINK"
 say "등록: $LINK -> ${ROOT}/eva"
 if ! printf '%s' ":${PATH}:" | grep -q ":${BIN}:"; then
     echo

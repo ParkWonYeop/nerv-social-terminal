@@ -759,6 +759,75 @@ def _():
              f"남의 훅을 우리 것으로 봤다: {other}")
 
 
+@check("훅 제거 — 우리 묶음에 사용자가 넣은 훅은 남긴다")
+def _():
+    import importlib.util
+    from nervterm import agents
+    spec = importlib.util.spec_from_file_location(
+        "_installhooks_mixed", ROOT / "install-hooks.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mine = {"type": "command", "command": "afplay /System/Sounds/Glass.aiff"}
+    cfg = {"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": "/opt/nerv/eva hook"}, mine]}]}}
+    mod.merge(cfg, agents.get("claude"), remove=True)
+    eq(cfg, {"hooks": {"Stop": [{"hooks": [mine]}]}},
+       "같은 묶음의 사용자 훅까지 지웠다")
+    true(any("afplay" in k for k in mod.survey(cfg)), "보존 목록에 안 보인다")
+
+
+@check("근무 일지 — 예산 끝자락에 걸린 평범한 줄을 초대형으로 보고 버리지 않는다")
+def _():
+    import shutil
+    import time as _time
+    from nervterm import agents, db, work
+    base = Path(_TMP) / "edge-budget"
+    proj = base / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    filler = (json.dumps({"type": "system", "text": "x" * 200}) + "\n") * 5
+    prompt = json.dumps({"type": "user", "promptSource": "typed",
+                         "timestamp": "2026-10-01T01:00:00Z",
+                         "message": {"content": "예산 끝자락의 프롬프트 " + "y" * 600}},
+                        ensure_ascii=False) + "\n"
+    (proj / "new.jsonl").write_text(filler, encoding="utf-8")
+    (proj / "old.jsonl").write_text(prompt, encoding="utf-8")
+    old_t = _time.time() - 60
+    os.utime(proj / "old.jsonl", (old_t, old_t))          # 새 것부터 읽힌다
+    claude = agents.get("claude")
+    claude.sessions_dir = lambda: base
+    try:
+        with db.session() as con:
+            db.init(con)
+            room = len(filler.encode()) + 100             # 프롬프트 줄보다 작다
+            work._scan_agent(con, claude, room)
+            work._scan_agent(con, claude, work.MAX_BYTES_PER_SCAN)
+            got = con.execute(
+                "SELECT 1 FROM work_facts WHERE player=? AND text LIKE ?",
+                (db.PLAYER, "예산 끝자락의 프롬프트%")).fetchone()
+            true(got is not None, "남은 예산보다 긴 줄을 버렸다")
+    finally:
+        del claude.sessions_dir
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@check("대화 엔진 — 부모 Claude Code 세션 표식은 넘기지 않고, 인증 설정은 넘긴다")
+def _():
+    from nervterm.llm import cli
+    keep = {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "s",
+            "CLAUDE_CODE_MESSAGING_TOKEN": "t", "CLAUDE_CODE_USE_BEDROCK": "1"}
+    old = {k: os.environ.get(k) for k in keep}
+    os.environ.update(keep)
+    try:
+        env = cli._game_env()
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    eq([k for k in keep if k in env], ["CLAUDE_CODE_USE_BEDROCK"], "넘긴 것")
+
+
 @check("위험 명령 — 언급과 실행을 구분한다")
 def _():
     from nervterm import economy
@@ -1411,16 +1480,26 @@ def _():
 
 @check("약속 — 말로 한 약속만 대화로 지킬 수 있다")
 def _():
-    from nervterm import db, stance
+    from nervterm import config, db, stance
     with db.session() as con:
         db.init(con)
         _fresh_promises(con, "rei")
         word = stance.make_promise(con, "커피를 줄이기로 했다", "")
         act = stance.make_promise(con, "도서관에 같이 간다", "date:library")
         eq(stance.keep_by_word(con, act), "", "행동이 필요한 약속을 말로 지켰다")
+        eq(stance.keep_by_word(con, str(word)), "",
+           "방금 한 약속을 다음 턴에 지켰다")
+        _promise_age(con, word, hours=config.PROMISE_VISIT_MIN_HOURS)
         eq(stance.keep_by_word(con, str(word)), "커피를 줄이기로 했다",
            "말로 한 약속")
         eq(stance.keep_by_word(con, "99999"), "", "없는 번호")
+        # 하루 호감 예산이 찼으면 지킨 약속도 호감은 더 못 올린다
+        db.put(con, "cap_aff_day", f"{db.today()}:{config.AFF_DAILY_MAX}")
+        aff0 = db.geti(con, "affection")
+        late = stance.make_promise(con, "주말엔 산책을 나간다", "")
+        _promise_age(con, late, hours=config.PROMISE_VISIT_MIN_HOURS)
+        true(stance.keep_by_word(con, late), "지키지 못했다")
+        eq(db.geti(con, "affection"), aff0, "예산 밖으로 호감이 올랐다")
 
 
 @check("약속 — 기한을 넘기면 감점 1회, 오래되면 잊는다")
@@ -1976,7 +2055,7 @@ def _():
 
 @check("기억 압축 — 없는 장소를 대상으로 한 약속은 말로 한 약속이 된다")
 def _():
-    from nervterm import characters, db, game, stance, world
+    from nervterm import characters, config, db, game, stance, world
     world.load(refresh=True)
     with db.session() as con:
         db.init(con)
@@ -2001,6 +2080,7 @@ def _():
         eq(got.get("포장마차에 같이 가기로 했다"), "date:yatai", "맞는 대상")
         pid = next(p for p, text, *_ in stance.open_promises(con)
                    if "놀이공원" in text)
+        _promise_age(con, pid, hours=config.PROMISE_VISIT_MIN_HOURS)
         true(stance.keep_by_word(con, pid), "말로 지킬 길도 막혔다")
 
 
@@ -2354,6 +2434,43 @@ def _():
         os.environ["REI_PLAYER"] = saved
 
 
+@check("v7 승격 — 중간에 멈춘 승격을 다시 돌려도 유령 적립은 한 번만 합친다")
+def _():
+    import pwd
+    from nervterm import db
+    me = pwd.getpwuid(os.getuid()).pw_name
+    saved, seed = db.PLAYER, db.seed_characters
+    db.PLAYER = me
+    try:
+        with db.session() as con:
+            db.init(con)
+            for p in (me, "root"):
+                con.execute("DELETE FROM state WHERE player=?", (p,))
+            for p, lcl in ((me, 100), ("root", 900)):
+                con.execute("INSERT INTO state(player,char,key,value) "
+                            "VALUES(?,'','lcl',?)", (p, str(lcl)))
+            con.execute("PRAGMA user_version=6")
+
+            def boom(*a, **k):
+                raise RuntimeError("승격 도중 멈춤")
+            db.seed_characters = boom            # 합치기 뒤에서 멈춘다
+            try:
+                db.init(con)
+            except RuntimeError:
+                pass
+            db.seed_characters = seed
+            eq(db.geti(con, "lcl"), 100, "멈춘 승격의 절반이 남았다")
+            db.init(con)
+            eq(db.geti(con, "lcl"), 1000, "두 번째 승격에서 두 번 합쳤다")
+            eq(con.execute("PRAGMA user_version").fetchone()[0],
+               db.SCHEMA_VERSION, "판 번호")
+            for p in (me, "root"):
+                for table in ("state", "ledger", "daily"):
+                    con.execute(f"DELETE FROM {table} WHERE player=?", (p,))
+    finally:
+        db.PLAYER, db.seed_characters = saved, seed
+
+
 @check("v7 승격 — 유령 'root' 의 적립을 실제 사용자에게 합친다 (만난 적 있으면 안 건드림)")
 def _():
     import pwd
@@ -2661,6 +2778,7 @@ def _():
         for text in ("커피를 하루 두 잔으로 줄인다", "주말엔 산책을 나간다",
                      "책상 정리를 끝낸다", "편지를 써서 보낸다"):
             p = stance.make_promise(con, text, "", rei)
+            _promise_age(con, p, hours=config.PROMISE_VISIT_MIN_HOURS)
             stance.keep_by_word(con, p)
         eq(db.geti(con, "trust"),
            trust0 + config.TRUST_KEPT_PROMISE * config.PROMISE_KEPT_DAILY_MAX,
@@ -2669,13 +2787,14 @@ def _():
 
 @check("검토 — 지키거나 어긴 약속은 같은 말로 되살아나지 않는다")
 def _():
-    from nervterm import characters, db, stance
+    from nervterm import characters, config, db, stance
     with db.session() as con:
         db.init(con)
         rei = characters.get("rei")
         _reset_char(con, "rei")
         pid = stance.make_promise(con, "오늘은 일찍 잔다고 했다", "", rei)
-        stance.keep_by_word(con, pid)
+        _promise_age(con, pid, hours=config.PROMISE_VISIT_MIN_HOURS)
+        true(stance.keep_by_word(con, pid), "지키지 못했다")
         eq(stance.make_promise(con, "오늘은 일찍 잔다고 했다", "", rei), 0,
            "지킨 약속이 새 약속으로 되살아났다 — 닷새 뒤 감점")
 
@@ -2715,6 +2834,24 @@ def _():
         g.episode(key)
         eq(db.geti(con, "lcl"), after_first, "그만둔 이야기에 또 값을 받았다")
         true(after_first < 2000, "처음에는 받아야 한다")
+
+
+@check("검토 — 이야기 1막을 끊고 다시 봐도 하루 호감 예산을 넘지 않는다")
+def _():
+    from nervterm import characters, config, db, game, world
+    world.load(refresh=True)
+    with db.session() as con:
+        db.init(con)
+        char = characters.get("asuka")
+        key, _t, _p, need_aff, need_trust, _pr = char.episodes[0]
+        _reset_char(con, char.id, affection=need_aff, trust=max(need_trust, 50))
+        db.put(con, "lcl", 2000)
+        g = game.Game(con, char, offline=False, animate=False, headless=True)
+        g.pick_action = lambda choices: ""            # 1막에서 매번 그만둔다
+        _with_provider(_fake_provider(_GENEROUS),
+                       lambda: [g.episode(key) for _ in range(20)])
+        true(db.geti(con, "affection") - need_aff <= config.AFF_DAILY_MAX,
+             "1막 반복으로 하루 예산을 넘었다")
 
 
 @check("검토 — 연속 접속 보너스는 7일 배율에서 멈춘다")

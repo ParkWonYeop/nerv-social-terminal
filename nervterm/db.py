@@ -690,6 +690,15 @@ def init(con: sqlite3.Connection, *, with_characters: bool = None) -> None:
         _backup(con, ver)
     _migrate(con)
     con.executescript(SCHEMA)      # 주의: 진행 중 트랜잭션을 commit 한다
+    # 승격은 쓰기 락 하나 안에서 — 판 번호도 락을 잡은 뒤 다시 읽는다.
+    # 아니면 동시에 뜬 훅·게임이 둘 다 옛 판을 보고 v7 합치기를 두 번
+    # 돌거나, 중간에 멈춘 승격이 다음 실행에서 유령 LCL 을 또 더했다.
+    with tx(con):
+        _init_body(con, with_characters)
+
+
+def _init_body(con, with_characters) -> None:
+    ver = con.execute("PRAGMA user_version").fetchone()[0]
     _ensure_columns(con)
     _sanitize_stored_text(con)
     _upgrade_v5(con)

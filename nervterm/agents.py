@@ -27,11 +27,29 @@ _OURS = re.compile(
     r"(?:^|[/\s])(?:eva|nervterm|rei)(?:\.py)?['\"]?\s+hook(?:\s|$)")
 
 
+def is_our_command(h) -> bool:
+    return bool(_OURS.search(str((h or {}).get("command", ""))))
+
+
 def is_our_hook(entry) -> bool:
-    for h in (entry or {}).get("hooks", []):
-        if _OURS.search(str(h.get("command", ""))):
-            return True
-    return False
+    return any(is_our_command(h) for h in (entry or {}).get("hooks", []))
+
+
+def strip_ours(arr: list) -> list:
+    """훅 묶음 목록에서 우리 명령만 뺀다. 남의 명령이 남은 묶음은 살린다.
+
+    사용자가 /hooks 로 우리 묶음(같은 matcher)에 자기 훅을 넣는 일이 있다.
+    묶음째 지우면 그 훅이 재설치·제거 때 함께 사라졌다.
+    """
+    out = []
+    for e in arr:
+        if not is_our_hook(e):
+            out.append(e)
+            continue
+        rest = [h for h in e.get("hooks", []) if not is_our_command(h)]
+        if rest:
+            out.append({**e, "hooks": rest})
+    return out
 
 
 def _clean(s: str) -> str:

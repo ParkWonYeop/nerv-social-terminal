@@ -49,7 +49,19 @@ def _game_env():
     env["REI_GAME"] = "1"          # 옛 이름 — 설치된 훅이 아직 이걸 본다
     env["NERV_GAME"] = "1"
     env.pop("ANTHROPIC_API_KEY", None)   # 구독 좌석으로만 돌린다
+    # Claude Code 안에서(`! eva say`) 불리면 부모 세션의 표식이 물려 와,
+    # claude -p 가 사용자의 살아 있는 세션의 자식으로 돈다. 인증·프로바이더
+    # 설정(CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_OAUTH_TOKEN …)은 남긴다.
+    for k in _PARENT_SESSION_ENV:
+        env.pop(k, None)
     return env
+
+
+_PARENT_SESSION_ENV = (
+    "CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -127,6 +139,9 @@ class ClaudeCLI(Provider):
             "--disable-slash-commands",
             "--disallowed-tools", *config.LLM_DISALLOWED.split(),
             "--max-turns", "1",
+            # 대사 한 줄마다 ~/.claude/projects/ 에 세션이 쌓여 resume 목록을
+            # 덮고, 다음 근무 일지 스캔 예산까지 먹었다 (codex 는 --ephemeral)
+            "--no-session-persistence",
             "--system-prompt", system,
             user,
         ]
