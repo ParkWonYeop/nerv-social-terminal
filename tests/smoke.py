@@ -2434,6 +2434,43 @@ def _():
         os.environ["REI_PLAYER"] = saved
 
 
+@check("v7 승격 — 중간에 멈춘 승격을 다시 돌려도 유령 적립은 한 번만 합친다")
+def _():
+    import pwd
+    from nervterm import db
+    me = pwd.getpwuid(os.getuid()).pw_name
+    saved, seed = db.PLAYER, db.seed_characters
+    db.PLAYER = me
+    try:
+        with db.session() as con:
+            db.init(con)
+            for p in (me, "root"):
+                con.execute("DELETE FROM state WHERE player=?", (p,))
+            for p, lcl in ((me, 100), ("root", 900)):
+                con.execute("INSERT INTO state(player,char,key,value) "
+                            "VALUES(?,'','lcl',?)", (p, str(lcl)))
+            con.execute("PRAGMA user_version=6")
+
+            def boom(*a, **k):
+                raise RuntimeError("승격 도중 멈춤")
+            db.seed_characters = boom            # 합치기 뒤에서 멈춘다
+            try:
+                db.init(con)
+            except RuntimeError:
+                pass
+            db.seed_characters = seed
+            eq(db.geti(con, "lcl"), 100, "멈춘 승격의 절반이 남았다")
+            db.init(con)
+            eq(db.geti(con, "lcl"), 1000, "두 번째 승격에서 두 번 합쳤다")
+            eq(con.execute("PRAGMA user_version").fetchone()[0],
+               db.SCHEMA_VERSION, "판 번호")
+            for p in (me, "root"):
+                for table in ("state", "ledger", "daily"):
+                    con.execute(f"DELETE FROM {table} WHERE player=?", (p,))
+    finally:
+        db.PLAYER, db.seed_characters = saved, seed
+
+
 @check("v7 승격 — 유령 'root' 의 적립을 실제 사용자에게 합친다 (만난 적 있으면 안 건드림)")
 def _():
     import pwd

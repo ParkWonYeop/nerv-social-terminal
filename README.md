@@ -21,7 +21,7 @@
 ![Python](https://img.shields.io/badge/python-3.9+-9ec5e0?style=flat-square)
 ![TUI](https://img.shields.io/badge/TUI-rich-e0764a?style=flat-square)
 ![Agents](https://img.shields.io/badge/Claude_Code-·_Codex-a98bd0?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-144-8fbf9a?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-149-8fbf9a?style=flat-square)
 
 </div>
 
@@ -1008,6 +1008,7 @@ eva --plugins       장착된 부품 확인
 | 参拾弐 | 대사 한 줄마다 `~/.claude/projects/` 에 세션 파일이 쌓임 | `claude -p` 가 세션을 저장한다 (codex 는 `--ephemeral` 이었다) | `--no-session-persistence` |
 | 参拾参 | `! eva say` 의 `claude -p` 가 지금 쓰는 Claude Code 세션의 자식으로 돔 | 부모 세션 표식(`CLAUDECODE` · `CLAUDE_CODE_SESSION_ID` …)을 물려줬다 | 표식만 빼고 넘긴다 |
 | 参拾四 | 밀린 기록을 읽을 때마다 파일 첫 줄이 하나씩 사라짐 — Codex 검토 스레드가 근무로 잡힘 | '남은 예산' 을 '파일 크기' 처럼 보고 예산 끝자락의 평범한 줄을 초대형 줄로 버렸다 | 초대형 판정은 1MB 이상 읽었을 때만 |
+| 参拾伍 | v7 승격이 멈췄다 다시 돌면 유령 LCL 이 두 번 들어옴 (1,000 → 2,000) | 승격 본문이 자동 커밋으로 한 문장씩 들어갔고, 판 번호를 락 밖에서 읽었다 | 승격을 쓰기 락 하나로 · 락 안에서 판 번호를 다시 읽는다 |
 
 > **診断** — `/status` 에 이상한 감점이 보이면 `ledger` 테이블에 사유가 남아 있다.
 >
@@ -1053,7 +1054,7 @@ REI_HOOK_DEBUG=1                                hook.log 에 훅 동작 기록
 ### 動作試験
 
 ```bash
-python3 tests/smoke.py    # 계통 시험 126건
+python3 tests/smoke.py    # 계통 시험 131건
 python3 tests/keys.py     # 입력 시험 18건 (의사 터미널)
 ```
 
